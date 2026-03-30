@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 6% 10%;
+    --foreground: 0 0% 96%;
+    --card: 240 5% 14%;
+    --card-foreground: 0 0% 96%;
+    --popover: 240 5% 14%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 328 84% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 4% 20%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 240 4% 20%;
+    --muted-foreground: 240 5% 58%;
+    --accent: 328 50% 22%;
+    --accent-foreground: 328 84% 90%;
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 4% 22%;
+    --input: 240 4% 22%;
+    --ring: 328 84% 55%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Rajdhani', system-ui, sans-serif;
+  }
+  code,
+  pre,
+  .font-mono-ui {
+    font-family: 'Share Tech Mono', ui-monospace, monospace;
+  }
+}
