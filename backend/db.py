@@ -23,6 +23,15 @@ async def init_db() -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS gpu_config_baseline (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                json TEXT NOT NULL DEFAULT '{}',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS rag_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,

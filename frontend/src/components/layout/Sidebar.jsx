@@ -86,13 +86,10 @@ export function Sidebar() {
           <Users className="h-4 w-4 shrink-0" />
           Personas
         </NavLink>
-        <span
-          className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
-          title="Phase 5"
-        >
+        <NavLink to="/gpu" className={linkClass}>
           <Monitor className="h-4 w-4 shrink-0" />
-          Multi-GPU <Soon />
-        </span>
+          Multi-GPU
+        </NavLink>
         <span
           className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
           title="Phase 6"

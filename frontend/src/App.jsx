@@ -7,6 +7,7 @@ import { ModelfilePage } from '@/pages/ModelfilePage.jsx'
 import { ImportPage } from '@/pages/ImportPage.jsx'
 import { PersonasPage } from '@/pages/PersonasPage.jsx'
 import { PlaceholderPage } from '@/pages/PlaceholderPage.jsx'
+import { GpuPage } from '@/pages/GpuPage.jsx'
 
 export default function App() {
   return (
@@ -20,7 +21,7 @@ export default function App() {
           <Route path="/models/:name" element={<ModelfilePage />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/personas" element={<PersonasPage />} />
-          <Route path="/gpu" element={<PlaceholderPage title="Multi-GPU" phase="Phase 5" />} />
+          <Route path="/gpu" element={<GpuPage />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />
           <Route path="/agents" element={<PlaceholderPage title="Agents" phase="Phase 7" />} />
           <Route path="/agents/new" element={<PlaceholderPage title="New Agent" phase="Phase 7" />} />
