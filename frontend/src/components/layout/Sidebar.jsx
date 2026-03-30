@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Cpu, Layers, PlusCircle, Users, Monitor, BookOpen, Bot, GitBranch } from 'lucide-react'
+import {
+  LayoutDashboard,
+  Cpu,
+  Layers,
+  PlusCircle,
+  FolderInput,
+  Users,
+  Monitor,
+  BookOpen,
+  Bot,
+  GitBranch,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { listModels } from '@/api/ollama.js'
 
@@ -47,28 +58,34 @@ export function Sidebar() {
           <LayoutDashboard className="h-4 w-4 shrink-0" />
           Dashboard
         </NavLink>
-        <NavLink to="/models" className={linkClass}>
-          <Layers className="h-4 w-4 shrink-0" />
-          Models
-        </NavLink>
+        <div className="space-y-0.5">
+          <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Models
+          </div>
+          <NavLink to="/models" end className={linkClass}>
+            <Layers className="h-4 w-4 shrink-0" />
+            All models
+          </NavLink>
+          <NavLink to="/import" className={linkClass}>
+            <FolderInput className="h-4 w-4 shrink-0" />
+            Import
+          </NavLink>
+          <NavLink to="/models/create" className={linkClass}>
+            <PlusCircle className="h-4 w-4 shrink-0" />
+            Create
+          </NavLink>
+        </div>
         <NavLink to="/running" className={linkClass}>
           <Cpu className="h-4 w-4 shrink-0" />
           Running
         </NavLink>
-        <NavLink to="/models/create" className={linkClass}>
-          <PlusCircle className="h-4 w-4 shrink-0" />
-          Create Model
-        </NavLink>
 
         <div className="my-2 border-t border-border" />
 
-        <span
-          className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
-          title="Phase 3"
-        >
+        <NavLink to="/personas" className={linkClass}>
           <Users className="h-4 w-4 shrink-0" />
-          Personas <Soon />
-        </span>
+          Personas
+        </NavLink>
         <span
           className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
           title="Phase 5"

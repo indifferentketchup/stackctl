@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_deps import require_admin
@@ -32,6 +32,15 @@ class PullBody(BaseModel):
 class CreateBody(BaseModel):
     name: str
     modelfile: str
+
+
+class CreateQuantizedBody(BaseModel):
+    name: str
+    modelfile: str
+    quantize: str | None = None
+
+
+_ALLOWED_QUANTIZE = frozenset({"q8_0", "q4_K_S", "q4_K_M"})
 
 
 class CopyBody(BaseModel):
@@ -174,9 +183,13 @@ async def _stream_ollama_pull(model: str) -> AsyncIterator[bytes]:
         yield _sse(json.dumps({"error": str(e)}))
 
 
-async def _stream_ollama_create(name: str, modelfile: str) -> AsyncIterator[bytes]:
+async def _stream_ollama_create(
+    name: str, modelfile: str, quantize: str | None = None
+) -> AsyncIterator[bytes]:
     base = _ollama_base()
-    payload = {"name": name, "modelfile": modelfile, "stream": True}
+    payload: dict = {"name": name, "modelfile": modelfile, "stream": True}
+    if quantize:
+        payload["quantize"] = quantize
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None)) as client:
             async with client.stream("POST", f"{base}/api/create", json=payload) as resp:
@@ -232,6 +245,106 @@ async def create_model(body: CreateBody, _owner: dict = Depends(require_admin)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/create-quantized")
+async def create_quantized(body: CreateQuantizedBody, _owner: dict = Depends(require_admin)):
+    name = (body.name or "").strip()
+    mf = body.modelfile or ""
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if not mf.strip():
+        raise HTTPException(status_code=400, detail="modelfile is required")
+    raw_q = (body.quantize or "").strip() or None
+    if raw_q and raw_q not in _ALLOWED_QUANTIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"quantize must be one of: {', '.join(sorted(_ALLOWED_QUANTIZE))}",
+        )
+    return StreamingResponse(
+        _stream_ollama_create(name, mf, quantize=raw_q),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _hf_metadata(data: dict) -> dict:
+    meta: dict = {"architecture": None, "parameter_size": None, "license": None}
+    pt = data.get("pipeline_tag")
+    if isinstance(pt, str) and pt.strip():
+        meta["architecture"] = pt.strip()
+    cfg = data.get("config")
+    if isinstance(cfg, dict) and not meta["architecture"]:
+        mt = cfg.get("model_type")
+        if isinstance(mt, str) and mt.strip():
+            meta["architecture"] = mt.strip()
+    st = data.get("safetensors")
+    if isinstance(st, dict):
+        tot = st.get("total")
+        if tot is not None:
+            meta["parameter_size"] = tot
+    gguf = data.get("gguf")
+    if isinstance(gguf, dict) and meta["parameter_size"] is None:
+        tp = gguf.get("total_parameters")
+        if tp is not None:
+            meta["parameter_size"] = tp
+    card = data.get("cardData")
+    if isinstance(card, dict):
+        lic = card.get("license")
+        if isinstance(lic, str) and lic.strip():
+            meta["license"] = lic.strip()
+        elif isinstance(lic, list) and lic:
+            meta["license"] = str(lic[0])
+    if meta["license"] is None:
+        top = data.get("license")
+        if isinstance(top, str) and top.strip():
+            meta["license"] = top.strip()
+    return meta
+
+
+@router.get("/hf-files")
+async def hf_model_files(repo: str = Query(..., min_length=1)):
+    raw = (repo or "").strip().strip("/")
+    if not raw or ".." in raw.split("/"):
+        raise HTTPException(status_code=400, detail="invalid repo")
+    url = f"https://huggingface.co/api/models/{raw}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(45.0),
+            headers={"Accept": "application/json"},
+        ) as client:
+            r = await client.get(url)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    if r.status_code == 404:
+        return JSONResponse({"error": "repo not found"}, status_code=404)
+    if r.status_code >= 400:
+        detail = r.text[:2000] if r.text else r.reason_phrase
+        raise HTTPException(status_code=502, detail=f"HuggingFace error: {detail}")
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Invalid JSON from HuggingFace") from None
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Unexpected HuggingFace response")
+
+    siblings = data.get("siblings")
+    files: list[dict] = []
+    if isinstance(siblings, list):
+        for s in siblings:
+            if not isinstance(s, dict):
+                continue
+            fn = s.get("rfilename") or s.get("path") or ""
+            if not isinstance(fn, str) or not fn.lower().endswith(".gguf"):
+                continue
+            sz = s.get("size")
+            files.append({"name": fn, "size": sz if isinstance(sz, (int, float)) else None})
+
+    return {"metadata": _hf_metadata(data), "files": files, "repo_id": raw}
 
 
 @router.post("/copy", dependencies=[Depends(require_admin)])

@@ -102,3 +102,31 @@ export function pullModelStream(model, onEvent, signal) {
 export function createModelStream(name, modelfile, onEvent, signal) {
   return consumeSsePost('/api/ollama/create', { name, modelfile }, onEvent, signal)
 }
+
+/**
+ * Create with optional quantize (q8_0 | q4_K_S | q4_K_M). Omit quantize for normal create.
+ */
+export function createQuantizedModelStream(name, modelfile, quantize, onEvent, signal) {
+  const body = { name, modelfile }
+  if (quantize) body.quantize = quantize
+  return consumeSsePost('/api/ollama/create-quantized', body, onEvent, signal)
+}
+
+/** HuggingFace repo file list; returns `{ error }` on 404 without throwing. */
+export async function fetchHfRepoFiles(repo) {
+  const q = new URLSearchParams({ repo })
+  const res = await fetch(`/api/ollama/hf-files?${q}`, { headers: getAuthHeaders() })
+  let data = {}
+  try {
+    data = await res.json()
+  } catch {
+    data = {}
+  }
+  if (res.status === 404 && data?.error) return data
+  if (!res.ok) {
+    const msg =
+      typeof data?.detail === 'string' ? data.detail : data?.error || res.statusText || `HTTP ${res.status}`
+    throw new Error(msg)
+  }
+  return data
+}

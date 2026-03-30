@@ -4,6 +4,8 @@ import { HomePage } from '@/pages/HomePage.jsx'
 import { ModelsPage } from '@/pages/ModelsPage.jsx'
 import { RunningModelsPage } from '@/pages/RunningModelsPage.jsx'
 import { ModelfilePage } from '@/pages/ModelfilePage.jsx'
+import { ImportPage } from '@/pages/ImportPage.jsx'
+import { PersonasPage } from '@/pages/PersonasPage.jsx'
 import { PlaceholderPage } from '@/pages/PlaceholderPage.jsx'
 
 export default function App() {
@@ -16,14 +18,8 @@ export default function App() {
           <Route path="/running" element={<RunningModelsPage />} />
           <Route path="/models/create" element={<ModelfilePage />} />
           <Route path="/models/:name" element={<ModelfilePage />} />
-          <Route
-            path="/import"
-            element={<PlaceholderPage title="Import Model" phase="Phase 4" />}
-          />
-          <Route
-            path="/personas"
-            element={<PlaceholderPage title="Personas" phase="Phase 3" />}
-          />
+          <Route path="/import" element={<ImportPage />} />
+          <Route path="/personas" element={<PersonasPage />} />
           <Route path="/gpu" element={<PlaceholderPage title="Multi-GPU" phase="Phase 5" />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />
           <Route path="/agents" element={<PlaceholderPage title="Agents" phase="Phase 7" />} />
