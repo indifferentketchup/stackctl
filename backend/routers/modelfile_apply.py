@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -20,6 +19,16 @@ from pydantic import BaseModel
 
 from auth_deps import require_admin
 from routers.ollama import _ollama_base, _sse, _stream_ollama_pull
+from sam_ssh import (
+    connect_sam_desktop,
+    iter_ssh_cmd_lines,
+    powershell_single_quote,
+    remote_temp_modelfile_path,
+    sam_desktop_host,
+    sam_desktop_user,
+    ssh_remove_file,
+    ssh_write_file,
+)
 from templates import DEFAULT_STOP_TOKENS, TEMPLATES
 
 router = APIRouter()
@@ -40,22 +49,6 @@ class PullAndCreateBody(BaseModel):
     name: str
     template: str = "chatml"
     parameters: dict[str, Any] = {}
-
-
-def _sam_desktop_host() -> str:
-    return (os.environ.get("SAMDESKTOP_HOST") or "100.101.41.16").strip()
-
-
-def _sam_desktop_user() -> str:
-    return (os.environ.get("SAMDESKTOP_USER") or "samki").strip()
-
-
-def _sam_desktop_key_path() -> str:
-    return (os.environ.get("SAMDESKTOP_SSH_KEY") or "/opt/ollamactl/ssh/id_ed25519").strip()
-
-
-def _powershell_single_quote(s: str) -> str:
-    return "'" + s.replace("'", "''") + "'"
 
 
 def _kv_blob_size(info: dict[str, Any] | None) -> int | None:
@@ -177,92 +170,6 @@ def _build_modelfile_from_parts(
     return "\n".join(lines) + "\n"
 
 
-async def _connect_sam_desktop() -> asyncssh.SSHClientConnection:
-    host = _sam_desktop_host()
-    user = _sam_desktop_user()
-    key_path = _sam_desktop_key_path()
-    if not os.path.isfile(key_path):
-        raise OSError("SSH key is not available")
-    try:
-        conn = await asyncio.wait_for(
-            asyncssh.connect(
-                host,
-                username=user,
-                client_keys=[key_path],
-                known_hosts=None,
-            ),
-            timeout=15.0,
-        )
-    except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
-        raise OSError("Could not connect over SSH") from e
-    return conn
-
-
-async def _remote_temp_modelfile_path(conn: asyncssh.SSHClientConnection, fname: str) -> str:
-    safe = fname.replace("'", "''")
-    cmd = (
-        f'powershell -NoProfile -Command '
-        f'"[Console]::Out.WriteLine([System.IO.Path]::Combine($env:TEMP, \'{safe}\'))"'
-    )
-    r = await conn.run(cmd, check=True, encoding="utf-8")
-    out = (r.stdout or "").strip().splitlines()
-    if not out:
-        raise RuntimeError("Could not resolve temp path over SSH")
-    return out[-1].strip()
-
-
-async def _ssh_write_modelfile(conn: asyncssh.SSHClientConnection, remote_path: str, content: str) -> None:
-    data = content.encode("utf-8")
-    async with conn.start_sftp() as sftp:
-        async with sftp.open(remote_path, "wb") as f:
-            await f.write(data)
-
-
-async def _ssh_remove_file(conn: asyncssh.SSHClientConnection, remote_path: str) -> None:
-    try:
-        async with conn.start_sftp() as sftp:
-            await sftp.remove(remote_path)
-    except (OSError, asyncssh.Error):
-        pass
-
-
-async def _iter_ssh_cmd_lines(
-    conn: asyncssh.SSHClientConnection, cmd: str
-) -> AsyncIterator[tuple[str, int | None]]:
-    """Yield (`line`, None) for each output line, then (`__end__`, exit_code)."""
-    process = await conn.create_process(cmd, encoding="utf-8")
-    q: asyncio.Queue[str | None] = asyncio.Queue()
-
-    async def pump(stream: Any) -> None:
-        try:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                await q.put(line.rstrip("\r\n"))
-        finally:
-            await q.put(None)
-
-    t1 = asyncio.create_task(pump(process.stdout))
-    t2 = asyncio.create_task(pump(process.stderr))
-    finished = 0
-    try:
-        while finished < 2:
-            item = await q.get()
-            if item is None:
-                finished += 1
-                continue
-            if item:
-                yield (item, None)
-        await process.wait()
-        yield (
-            "__end__",
-            process.exit_status if process.exit_status is not None else -1,
-        )
-    finally:
-        await asyncio.gather(t1, t2, return_exceptions=True)
-
-
 async def _ssh_ollama_apply_stream(
     name: str,
     modelfile: str,
@@ -275,24 +182,24 @@ async def _ssh_ollama_apply_stream(
     remote_path = ""
     try:
         try:
-            conn = await _connect_sam_desktop()
+            conn = await connect_sam_desktop()
         except OSError as e:
             yield {"type": "error", "message": str(e)}
             return
 
-        remote_path = await _remote_temp_modelfile_path(conn, fname)
-        await _ssh_write_modelfile(conn, remote_path, modelfile)
+        remote_path = await remote_temp_modelfile_path(conn, fname)
+        await ssh_write_file(conn, remote_path, modelfile)
 
         if overwrite:
             show_ps = (
                 "powershell -NoProfile -Command "
-                + _powershell_single_quote(f"ollama show {name}")
+                + powershell_single_quote(f"ollama show {name}")
             )
             chk = await conn.run(show_ps, check=False, encoding="utf-8")
             if chk.exit_status == 0:
-                rm_ps = "powershell -NoProfile -Command " + _powershell_single_quote(f"ollama rm {name}")
+                rm_ps = "powershell -NoProfile -Command " + powershell_single_quote(f"ollama rm {name}")
                 exit_rm: int | None = None
-                async for text, code in _iter_ssh_cmd_lines(conn, rm_ps):
+                async for text, code in iter_ssh_cmd_lines(conn, rm_ps):
                     if text == "__end__":
                         exit_rm = code
                         break
@@ -302,9 +209,9 @@ async def _ssh_ollama_apply_stream(
                     return
 
         create_inner = f"ollama create {name} -f {remote_path}"
-        create_ps = "powershell -NoProfile -Command " + _powershell_single_quote(create_inner)
+        create_ps = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
         exit_c: int | None = None
-        async for text, code in _iter_ssh_cmd_lines(conn, create_ps):
+        async for text, code in iter_ssh_cmd_lines(conn, create_ps):
             if text == "__end__":
                 exit_c = code
                 break
@@ -318,7 +225,7 @@ async def _ssh_ollama_apply_stream(
     finally:
         if conn:
             if remote_path:
-                await _ssh_remove_file(conn, remote_path)
+                await ssh_remove_file(conn, remote_path)
             conn.close()
             await conn.wait_closed()
 
@@ -353,12 +260,12 @@ async def apply_modelfile_ssh(body: ApplyBody, _owner: dict = Depends(require_ad
 
 @router.get("/ssh-status")
 async def ssh_status():
-    host = _sam_desktop_host()
-    user = _sam_desktop_user()
+    host = sam_desktop_host()
+    user = sam_desktop_user()
     err: str | None = None
     connected = False
     try:
-        conn = await asyncio.wait_for(_connect_sam_desktop(), timeout=8.0)
+        conn = await asyncio.wait_for(connect_sam_desktop(), timeout=8.0)
         connected = True
         conn.close()
         await conn.wait_closed()

@@ -18,11 +18,7 @@ from pydantic import BaseModel, Field
 
 from auth_deps import require_admin
 from db import DB_PATH
-from routers.modelfile_apply import (
-    _connect_sam_desktop,
-    _iter_ssh_cmd_lines,
-    _powershell_single_quote,
-)
+from sam_ssh import connect_sam_desktop, iter_ssh_cmd_lines, powershell_single_quote
 from routers.ollama import _ollama_base, _sse
 
 router = APIRouter()
@@ -291,18 +287,18 @@ def _parse_nssm_app_environment_extra(stdout: str, stderr: str, exit_code: int) 
 
 def _nssm_get_env_ps() -> str:
     inner = f"& '{NSSM_EXE}' get {OLLAMA_SERVICE} AppEnvironmentExtra"
-    return "powershell -NoProfile -Command " + _powershell_single_quote(inner)
+    return "powershell -NoProfile -Command " + powershell_single_quote(inner)
 
 
 def _nssm_set_env_ps(pairs: list[str]) -> str:
-    ps_args = ",".join(_powershell_single_quote(p) for p in pairs)
+    ps_args = ",".join(powershell_single_quote(p) for p in pairs)
     inner = f"$a = @({ps_args}); & '{NSSM_EXE}' set {OLLAMA_SERVICE} AppEnvironmentExtra @a"
-    return "powershell -NoProfile -Command " + _powershell_single_quote(inner)
+    return "powershell -NoProfile -Command " + powershell_single_quote(inner)
 
 
 def _nssm_action_ps(action: str) -> str:
     inner = f"& '{NSSM_EXE}' {action} {OLLAMA_SERVICE}"
-    return "powershell -NoProfile -Command " + _powershell_single_quote(inner)
+    return "powershell -NoProfile -Command " + powershell_single_quote(inner)
 
 
 @router.get("/nssm-env", dependencies=[Depends(require_admin)])
@@ -310,7 +306,7 @@ async def get_nssm_env():
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await _connect_sam_desktop()
+            conn = await connect_sam_desktop()
         except OSError as e:
             return {"env": {}, "error": str(e)}
         r = await conn.run(_nssm_get_env_ps(), check=False, encoding="utf-8")
@@ -344,12 +340,12 @@ async def _stream_ssh_cmd(cmd: str) -> AsyncIterator[bytes]:
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await _connect_sam_desktop()
+            conn = await connect_sam_desktop()
         except OSError as e:
             yield _sse(json.dumps({"type": "error", "message": str(e)}))
             return
         exit_c: int | None = None
-        async for text, code in _iter_ssh_cmd_lines(conn, cmd):
+        async for text, code in iter_ssh_cmd_lines(conn, cmd):
             if text == "__end__":
                 exit_c = code
                 break
@@ -396,12 +392,12 @@ async def _restart_ollama_gen() -> AsyncIterator[bytes]:
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await _connect_sam_desktop()
+            conn = await connect_sam_desktop()
         except OSError as e:
             yield _sse(json.dumps({"type": "error", "message": str(e)}))
             return
         exit_c: int | None = None
-        async for text, code in _iter_ssh_cmd_lines(conn, cmd):
+        async for text, code in iter_ssh_cmd_lines(conn, cmd):
             if text == "__end__":
                 exit_c = code
                 break
@@ -520,11 +516,11 @@ async def ollama_service_status():
     raw_combined = ""
     try:
         try:
-            conn = await _connect_sam_desktop()
+            conn = await connect_sam_desktop()
         except OSError as e:
             return {"status": "Unknown", "raw": "", "error": str(e)}
         inner = f"& '{NSSM_EXE}' status {OLLAMA_SERVICE}"
-        cmd = "powershell -NoProfile -Command " + _powershell_single_quote(inner)
+        cmd = "powershell -NoProfile -Command " + powershell_single_quote(inner)
         r = await conn.run(cmd, check=False, encoding="utf-8")
         out = (r.stdout or "").strip()
         err = (r.stderr or "").strip()

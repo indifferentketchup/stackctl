@@ -35,6 +35,15 @@ export function unloadModel(name) {
   })
 }
 
+/** Validate path on sam-desktop over SSH. */
+export function verifySamPath(path) {
+  return apiFetch('/api/ollama/verify-path', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+}
+
 export function copyModel(source, destination) {
   return apiFetch('/api/ollama/copy', {
     method: 'POST',

@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,6 +14,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_deps import require_admin
+from sam_ssh import (
+    connect_sam_desktop,
+    iter_ssh_cmd_lines,
+    powershell_single_quote,
+    remote_temp_modelfile_path,
+    ssh_remove_file,
+    ssh_write_file,
+)
 
 router = APIRouter()
 
@@ -38,6 +47,10 @@ class CreateQuantizedBody(BaseModel):
     name: str
     modelfile: str
     quantize: str | None = None
+
+
+class VerifyPathBody(BaseModel):
+    path: str
 
 
 _ALLOWED_QUANTIZE = frozenset({"q8_0", "q4_K_S", "q4_K_M"})
@@ -247,22 +260,133 @@ async def create_model(body: CreateBody, _owner: dict = Depends(require_admin)):
     )
 
 
-@router.post("/create-quantized")
-async def create_quantized(body: CreateQuantizedBody, _owner: dict = Depends(require_admin)):
+def _verify_path_ps(path: str) -> str:
+    p_esc = path.replace("'", "''")
+    inner = (
+        f"$p = '{p_esc}'; "
+        f"$exists = Test-Path -LiteralPath $p; "
+        f"$isFile = $false; $isDir = $false; $sz = $null; "
+        f"if ($exists) "
+        f"{{ $i = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue; "
+        f"if ($i) {{ $isFile = -not $i.PSIsContainer; $isDir = $i.PSIsContainer; "
+        f"if ($isFile) {{ $sz = [int64]$i.Length }} }} }}; "
+        f"@{{ exists = $exists; is_file = $isFile; is_dir = $isDir; size_bytes = $sz }} "
+        f"| ConvertTo-Json -Compress"
+    )
+    return "powershell -NoProfile -Command " + powershell_single_quote(inner)
+
+
+@router.post("/verify-path", dependencies=[Depends(require_admin)])
+async def verify_path(body: VerifyPathBody):
+    p = (body.path or "").strip().strip('"')
+    if not p:
+        raise HTTPException(status_code=400, detail="path is required")
+    if "\x00" in p:
+        raise HTTPException(status_code=400, detail="invalid path")
+    conn = None
+    try:
+        try:
+            conn = await connect_sam_desktop()
+        except OSError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        r = await conn.run(_verify_path_ps(p), check=False, encoding="utf-8")
+        out = (r.stdout or "").strip()
+        if not out:
+            return {"exists": False, "is_file": False, "is_dir": False, "size_bytes": None}
+        try:
+            data = json.loads(out.splitlines()[-1])
+        except json.JSONDecodeError:
+            return {"exists": False, "is_file": False, "is_dir": False, "size_bytes": None}
+        if not isinstance(data, dict):
+            return {"exists": False, "is_file": False, "is_dir": False, "size_bytes": None}
+        exists = bool(data.get("exists"))
+        is_file = bool(data.get("is_file"))
+        is_dir = bool(data.get("is_dir"))
+        raw_sz = data.get("size_bytes")
+        size_bytes: int | None
+        if raw_sz is None or raw_sz == "":
+            size_bytes = None
+        else:
+            try:
+                size_bytes = int(raw_sz)
+            except (TypeError, ValueError):
+                size_bytes = None
+        return {"exists": exists, "is_file": is_file, "is_dir": is_dir, "size_bytes": size_bytes}
+    finally:
+        if conn:
+            conn.close()
+            await conn.wait_closed()
+
+
+async def _ssh_create_quantized_sse(body: CreateQuantizedBody) -> AsyncIterator[bytes]:
     name = (body.name or "").strip()
     mf = body.modelfile or ""
     if not name:
-        raise HTTPException(status_code=400, detail="name is required")
+        yield _sse(json.dumps({"type": "error", "message": "name is required"}))
+        return
     if not mf.strip():
-        raise HTTPException(status_code=400, detail="modelfile is required")
+        yield _sse(json.dumps({"type": "error", "message": "modelfile is required"}))
+        return
     raw_q = (body.quantize or "").strip() or None
     if raw_q and raw_q not in _ALLOWED_QUANTIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"quantize must be one of: {', '.join(sorted(_ALLOWED_QUANTIZE))}",
+        yield _sse(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"quantize must be one of: {', '.join(sorted(_ALLOWED_QUANTIZE))}",
+                }
+            )
         )
+        return
+
+    fname = f"ollamactl_quant_{uuid.uuid4().hex}.txt"
+    conn = None
+    remote_path = ""
+    try:
+        try:
+            conn = await connect_sam_desktop()
+        except OSError as e:
+            yield _sse(json.dumps({"type": "error", "message": str(e)}))
+            return
+
+        remote_path = await remote_temp_modelfile_path(conn, fname)
+        await ssh_write_file(conn, remote_path, mf)
+
+        if raw_q:
+            create_inner = f"ollama create {name} --quantize {raw_q} -f {remote_path}"
+        else:
+            create_inner = f"ollama create {name} -f {remote_path}"
+        create_ps = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
+        exit_c: int | None = None
+        async for text, code in iter_ssh_cmd_lines(conn, create_ps):
+            if text == "__end__":
+                exit_c = code
+                break
+            yield _sse(json.dumps({"type": "log", "line": text}))
+
+        if exit_c is None or exit_c != 0:
+            yield _sse(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"ollama create exited with code {exit_c}",
+                    }
+                )
+            )
+            return
+        yield _sse(json.dumps({"type": "done", "success": True}))
+    finally:
+        if conn:
+            if remote_path:
+                await ssh_remove_file(conn, remote_path)
+            conn.close()
+            await conn.wait_closed()
+
+
+@router.post("/create-quantized")
+async def create_quantized(body: CreateQuantizedBody, _owner: dict = Depends(require_admin)):
     return StreamingResponse(
-        _stream_ollama_create(name, mf, quantize=raw_q),
+        _ssh_create_quantized_sse(body),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

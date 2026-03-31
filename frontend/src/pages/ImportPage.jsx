@@ -2,12 +2,10 @@ import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Loader2 } from 'lucide-react'
-import {
-  createQuantizedModelStream,
-  fetchHfRepoFiles,
-  listModels,
-  pullModelStream,
-} from '@/api/ollama.js'
+import { fetchHfRepoFiles, listModels, verifySamPath } from '@/api/ollama.js'
+import { consumeModelsSsePost, fetchSshStatus } from '@/api/models.js'
+import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
+import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import {
   Collapsible,
@@ -16,7 +14,6 @@ import {
 } from '@/components/ui/collapsible.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
-import { Progress } from '@/components/ui/progress.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 import { Textarea } from '@/components/ui/textarea.jsx'
 import { cn } from '@/lib/utils.js'
@@ -86,6 +83,12 @@ function parseQuantFromGgufFilename(name) {
     /\b(Q[0-9][A-Za-z0-9_.-]*|q[0-9]+_[kK]_[sSmM]|IQ[0-9]+_[A-Za-z0-9_.-]*|F16|F32|fp16|fp32)\b/i
   )
   return m ? m[1] : '—'
+}
+
+function apiTemplateFromPreset(presetId) {
+  if (presetId === 'llama3') return 'llama3'
+  if (presetId === 'mistral') return 'mistral'
+  return 'chatml'
 }
 
 function quantRowTone(label) {
@@ -165,6 +168,15 @@ function QuantizeSection({
 export function ImportPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const qSsh = useQuery({
+    queryKey: ['ssh-status'],
+    queryFn: fetchSshStatus,
+    refetchInterval: 30_000,
+    retry: false,
+  })
+  const sshBlocked = qSsh.data?.connected === false
+  const sshBlockTitle = 'sam-desktop unreachable via SSH'
+
   const [mainTab, setMainTab] = useState('gguf')
 
   const [ggufPath, setGgufPath] = useState('')
@@ -183,7 +195,16 @@ export function ImportPage() {
   const [modelNameSafe, setModelNameSafe] = useState('')
 
   const [creating, setCreating] = useState(false)
-  const [createStatus, setCreateStatus] = useState('')
+
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalLines, setTerminalLines] = useState([])
+  const [terminalRunning, setTerminalRunning] = useState(false)
+  const [terminalResult, setTerminalResult] = useState(null)
+
+  const [ggufVerify, setGgufVerify] = useState(null)
+  const [safeVerify, setSafeVerify] = useState(null)
+  const [verifyGgufBusy, setVerifyGgufBusy] = useState(false)
+  const [verifySafeBusy, setVerifySafeBusy] = useState(false)
 
   const [hfRepoInput, setHfRepoInput] = useState('')
   const [hfLookupLoading, setHfLookupLoading] = useState(false)
@@ -192,11 +213,7 @@ export function ImportPage() {
 
   const [hfPullName, setHfPullName] = useState('')
   const [hfSelectedFile, setHfSelectedFile] = useState('')
-
-  const [pulling, setPulling] = useState(false)
-  const [pullStatus, setPullStatus] = useState('')
-  const [pullPct, setPullPct] = useState(0)
-  const [pullCtrl, setPullCtrl] = useState(null)
+  const [hfCreateName, setHfCreateName] = useState('')
 
   const { data: tags } = useQuery({
     queryKey: ['ollama-models'],
@@ -252,34 +269,92 @@ export function ImportPage() {
     return buildModelfileFromGuided(g)
   }, [guided, safetensorsPath, loraMode, loraBase])
 
-  const runCreate = async (name, modelfile, tabLabel) => {
+  const pullCreateStops = useMemo(() => {
+    const preset = getPreset(guided.templatePreset)
+    const base = [...(preset.stops || []), ...(guided.stops || [])]
+    return [...new Set(base.map((s) => String(s).trim()).filter(Boolean))]
+  }, [guided.templatePreset, guided.stops])
+
+  const runVerifyGguf = async () => {
+    const p = ggufPath.trim()
+    if (!p) return
+    setVerifyGgufBusy(true)
+    setGgufVerify(null)
+    try {
+      const r = await verifySamPath(p)
+      setGgufVerify(r)
+    } catch (e) {
+      setGgufVerify({ exists: false, error: e.message || 'verify failed' })
+    } finally {
+      setVerifyGgufBusy(false)
+    }
+  }
+
+  const runVerifySafe = async () => {
+    const p = safetensorsPath.trim()
+    if (!p) return
+    setVerifySafeBusy(true)
+    setSafeVerify(null)
+    try {
+      const r = await verifySamPath(p)
+      setSafeVerify(r)
+    } catch (e) {
+      setSafeVerify({ exists: false, error: e.message || 'verify failed' })
+    } finally {
+      setVerifySafeBusy(false)
+    }
+  }
+
+  const runCreate = async (name, modelfile, _tabLabel) => {
     const n = name.trim()
     if (!n) return
     if (!modelfile.trim()) {
-      setCreateStatus('Modelfile is empty — check path and options.')
+      setTerminalOpen(true)
+      setTerminalLines(['Modelfile is empty — check path and options.'])
+      setTerminalResult('failed')
       return
     }
+    if (sshBlocked) return
+
+    const quant = quantizeEnabled ? quantChoice : null
     setCreating(true)
-    setCreateStatus('Starting…')
+    setTerminalLines([])
+    setTerminalResult(null)
+    setTerminalOpen(true)
+    setTerminalRunning(true)
+    let sawDone = false
+    let sawErr = false
     try {
-      const quant = quantizeEnabled ? quantChoice : null
-      await createQuantizedModelStream(
-        n,
-        modelfile,
-        quant,
+      await consumeModelsSsePost(
+        '/api/ollama/create-quantized',
+        { name: n, modelfile, quantize: quant },
         (ev) => {
-          if (ev.error) {
-            setCreateStatus(ev.error)
-            return
+          if (ev.type === 'log' && ev.line != null) {
+            setTerminalLines((prev) => [...prev, String(ev.line)])
           }
-          setCreateStatus(ev.status || JSON.stringify(ev).slice(0, 200))
-        }
+          if (ev.type === 'error') {
+            sawErr = true
+            setTerminalLines((prev) => [...prev, ev.message || 'Error'])
+            setTerminalResult('failed')
+          }
+          if (ev.type === 'done' && ev.success) {
+            sawDone = true
+            setTerminalResult('success')
+            qc.invalidateQueries({ queryKey: ['ollama-models'] })
+          }
+        },
+        undefined
       )
-      setCreateStatus('Success')
-      navigate('/models')
+      if (!sawDone && !sawErr) {
+        setTerminalLines((prev) => [...prev, 'Stream ended without completion'])
+        setTerminalResult('failed')
+      }
+      if (sawDone) navigate('/models')
     } catch (e) {
-      setCreateStatus(e.message || `${tabLabel} failed`)
+      setTerminalLines((prev) => [...prev, e.message || 'Import failed'])
+      setTerminalResult('failed')
     } finally {
+      setTerminalRunning(false)
       setCreating(false)
     }
   }
@@ -291,6 +366,7 @@ export function ImportPage() {
     setHfData(null)
     setHfSelectedFile('')
     setHfPullName('')
+    setHfCreateName('')
     setHfLookupLoading(true)
     try {
       const data = await fetchHfRepoFiles(repo)
@@ -315,46 +391,77 @@ export function ImportPage() {
     setHfSelectedFile(fileName)
     const stem = fileName.replace(/\.gguf$/i, '')
     if (normalizedRepo) setHfPullName(`hf.co/${normalizedRepo}:${stem}`)
+    setHfCreateName((prev) => {
+      if (prev.trim()) return prev
+      const leaf = fileName.split('/').pop() || fileName
+      const s = leaf.replace(/\.gguf$/i, '').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 64)
+      return s || 'imported-model'
+    })
   }
 
-  const startHfPull = async () => {
-    const m = hfPullName.trim()
-    if (!m || pulling) return
-    const ac = new AbortController()
-    setPullCtrl(ac)
-    setPulling(true)
-    setPullStatus('Starting…')
-    setPullPct(0)
+  const effectiveHfRef = useMemo(() => {
+    const r = hfPullName.trim()
+    if (!r) return ''
+    return r.toLowerCase().startsWith('hf.co/') ? r : `hf.co/${r.replace(/^\/*/, '')}`
+  }, [hfPullName])
+
+  const startHfPullAndCreate = async () => {
+    const ref = effectiveHfRef
+    const n = hfCreateName.trim()
+    if (!ref || !n || sshBlocked) return
+    setCreating(true)
+    setTerminalLines([])
+    setTerminalResult(null)
+    setTerminalOpen(true)
+    setTerminalRunning(true)
+    let sawDone = false
+    let sawErr = false
     try {
-      await pullModelStream(
-        m,
+      await consumeModelsSsePost(
+        '/api/models/pull-and-create',
+        {
+          hf_ref: ref,
+          name: n,
+          template: apiTemplateFromPreset(guided.templatePreset),
+          parameters: {
+            temperature: guided.params.temperature,
+            top_p: guided.params.top_p,
+            top_k: guided.params.top_k,
+            repeat_penalty: guided.params.repeat_penalty,
+            num_ctx: guided.params.num_ctx,
+            stop: pullCreateStops,
+          },
+        },
         (ev) => {
-          if (ev.error) {
-            setPullStatus(ev.error)
-            return
+          if (ev.type === 'log' && ev.line != null) {
+            setTerminalLines((prev) => [...prev, String(ev.line)])
           }
-          const st = ev.status || ''
-          setPullStatus(st)
-          const c = ev.completed
-          const t = ev.total
-          if (typeof c === 'number' && typeof t === 'number' && t > 0) {
-            setPullPct(Math.min(100, Math.round((100 * c) / t)))
+          if (ev.type === 'error') {
+            sawErr = true
+            setTerminalLines((prev) => [...prev, ev.message || 'Error'])
+            setTerminalResult('failed')
+          }
+          if (ev.type === 'done' && ev.success) {
+            sawDone = true
+            setTerminalResult('success')
+            qc.invalidateQueries({ queryKey: ['ollama-models'] })
           }
         },
-        ac.signal
+        undefined
       )
-      setPullStatus('Done')
-      setPullPct(100)
-      qc.invalidateQueries({ queryKey: ['ollama-models'] })
+      if (!sawDone && !sawErr) {
+        setTerminalLines((prev) => [...prev, 'Stream ended without completion'])
+        setTerminalResult('failed')
+      }
+      if (sawDone) navigate('/models')
     } catch (e) {
-      if (e.name !== 'AbortError') setPullStatus(e.message || 'Pull failed')
+      setTerminalLines((prev) => [...prev, e.message || 'Pull & create failed'])
+      setTerminalResult('failed')
     } finally {
-      setPulling(false)
-      setPullCtrl(null)
+      setTerminalRunning(false)
+      setCreating(false)
     }
   }
-
-  const cancelPull = () => pullCtrl?.abort()
 
   const samNote = (
     <p className="text-xs text-muted-foreground">
@@ -372,7 +479,15 @@ export function ImportPage() {
           </Link>
         </Button>
         <h1 className="text-2xl font-bold">Import Model</h1>
+        <SshStatusIndicator className="ml-auto" />
       </div>
+
+      {sshBlocked && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+          SSH to sam-desktop failed. Path checks and imports run on the Windows host — enable SSH or fix keys, then
+          retry.
+        </div>
+      )}
 
       {samNote}
 
@@ -416,6 +531,29 @@ export function ImportPage() {
               Full Windows path, e.g. <code className="font-mono-ui">D:\ollama models\blobs\sha256-…</code> or{' '}
               <code className="font-mono-ui">D:\mymodels\llama.gguf</code>
             </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={runVerifyGguf}
+                disabled={verifyGgufBusy || !ggufPath.trim() || sshBlocked}
+                title={sshBlocked ? sshBlockTitle : undefined}
+              >
+                {verifyGgufBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                Verify path
+              </Button>
+              {ggufVerify && !ggufVerify.error && (
+                <span className="text-xs text-muted-foreground">
+                  {ggufVerify.exists
+                    ? `✓ Exists${ggufVerify.is_file ? ' (file)' : ggufVerify.is_dir ? ' (dir)' : ''}`
+                    : '✗ Not found'}
+                </span>
+              )}
+              {ggufVerify?.error && (
+                <span className="text-xs text-destructive">✗ {ggufVerify.error}</span>
+              )}
+            </div>
           </div>
           {looksLikeMmproj(ggufPath) && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
@@ -487,19 +625,17 @@ export function ImportPage() {
             </div>
             <Button
               onClick={() => runCreate(modelNameGguf, ggufModelfile, 'Import')}
-              disabled={creating || !modelNameGguf.trim() || !ggufPath.trim()}
+              disabled={creating || !modelNameGguf.trim() || !ggufPath.trim() || sshBlocked}
+              title={sshBlocked ? sshBlockTitle : undefined}
             >
               {creating && <Loader2 className="h-4 w-4 animate-spin" />}
-              Import
+              Import via SSH
             </Button>
           </div>
           {pathLooksAlreadyQuantized(ggufPath) && !quantizeEnabled && (
             <p className="text-xs text-amber-200/90">
               Filename suggests this may already be quantized. Quantize-during-import needs an F16/F32 source.
             </p>
-          )}
-          {createStatus && mainTab === 'gguf' && (
-            <p className="text-xs text-muted-foreground break-words">{createStatus}</p>
           )}
         </TabsContent>
 
@@ -520,6 +656,27 @@ export function ImportPage() {
               onChange={(e) => setSafetensorsPath(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">Directory must contain model weights in .safetensors format.</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={runVerifySafe}
+                disabled={verifySafeBusy || !safetensorsPath.trim() || sshBlocked}
+                title={sshBlocked ? sshBlockTitle : undefined}
+              >
+                {verifySafeBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                Verify path
+              </Button>
+              {safeVerify && !safeVerify.error && (
+                <span className="text-xs text-muted-foreground">
+                  {safeVerify.exists
+                    ? `✓ Exists${safeVerify.is_dir ? ' (dir)' : safeVerify.is_file ? ' (file)' : ''}`
+                    : '✗ Not found'}
+                </span>
+              )}
+              {safeVerify?.error && <span className="text-xs text-destructive">✗ {safeVerify.error}</span>}
+            </div>
           </div>
           <label className="flex items-center gap-2 text-sm">
             <input
@@ -616,11 +773,16 @@ export function ImportPage() {
             <Button
               onClick={() => runCreate(modelNameSafe, safeModelfile, 'Import')}
               disabled={
-                creating || !modelNameSafe.trim() || !safetensorsPath.trim() || (loraMode && !loraBase.trim())
+                creating ||
+                !modelNameSafe.trim() ||
+                !safetensorsPath.trim() ||
+                (loraMode && !loraBase.trim()) ||
+                sshBlocked
               }
+              title={sshBlocked ? sshBlockTitle : undefined}
             >
               {creating && <Loader2 className="h-4 w-4 animate-spin" />}
-              Import
+              Import via SSH
             </Button>
           </div>
           {pathLooksAlreadyQuantized(safetensorsPath) && !quantizeEnabled && (
@@ -628,16 +790,12 @@ export function ImportPage() {
               Path name may indicate already-quantized weights. Enable quantize only for F16/F32 sources.
             </p>
           )}
-          {createStatus && mainTab === 'safetensors' && (
-            <p className="text-xs text-muted-foreground break-words">{createStatus}</p>
-          )}
         </TabsContent>
 
         <TabsContent value="huggingface" className="space-y-4 mt-6">
           <div className="rounded-md border border-border/80 bg-muted/20 px-3 py-2 text-xs text-muted-foreground leading-relaxed">
-            ℹ️ HuggingFace GGUF models tagged as multimodal (image-text-to-text) will cause Ollama to pull a vision
-            projector alongside the text model, resulting in a 500 error. If this happens, use the Modelfile Editor to
-            create the model manually with only the text blob&apos;s FROM line.
+            ℹ️ HF models tagged as multimodal will pull a vision projector, causing a double FROM and a 500 on load. Use
+            Pull &amp; Create below (same flow as the Models page) — it strips the projector and applies the template.
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
             <div className="flex-1 space-y-1">
@@ -710,7 +868,7 @@ export function ImportPage() {
             </div>
           )}
           <div className="space-y-1">
-            <Label>Pull name</Label>
+            <Label>Pull reference</Label>
             <Input
               className="font-mono-ui text-sm"
               value={hfPullName}
@@ -718,8 +876,17 @@ export function ImportPage() {
               placeholder="hf.co/user/repo:quant-or-stem"
             />
             <p className="text-xs text-muted-foreground">
-              HuggingFace pulls do not use the quantize-during-create option — files are already quantized.
+              Pulled blobs are already quantized. Pull &amp; Create rewrites the Modelfile via SSH on sam-desktop.
             </p>
+          </div>
+          <div className="space-y-1">
+            <Label>New model name</Label>
+            <Input
+              className="font-mono-ui text-sm"
+              value={hfCreateName}
+              onChange={(e) => setHfCreateName(e.target.value)}
+              placeholder="my-local-name"
+            />
           </div>
           {hfSelectedFile && looksLikeMmproj(hfSelectedFile) && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
@@ -727,21 +894,28 @@ export function ImportPage() {
               Select the text-only GGUF instead.
             </div>
           )}
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={startHfPull} disabled={pulling || !hfPullName.trim()}>
-                {pulling && <Loader2 className="h-4 w-4 animate-spin" />}
-                Pull
-              </Button>
-              <Button type="button" variant="outline" onClick={cancelPull} disabled={!pulling}>
-                Cancel
-              </Button>
-            </div>
-            {pullStatus && <p className="text-xs text-muted-foreground break-words">{pullStatus}</p>}
-            <Progress value={pullPct} />
-          </div>
+          <Button
+            onClick={startHfPullAndCreate}
+            disabled={creating || !effectiveHfRef || !hfCreateName.trim() || sshBlocked}
+            title={sshBlocked ? sshBlockTitle : undefined}
+          >
+            {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+            Pull &amp; Create via SSH
+          </Button>
         </TabsContent>
       </Tabs>
+
+      <ApplyTerminalPanel
+        open={terminalOpen}
+        onClose={() => {
+          setTerminalOpen(false)
+          setTerminalLines([])
+          setTerminalResult(null)
+        }}
+        lines={terminalLines}
+        running={terminalRunning}
+        result={terminalResult}
+      />
     </div>
   )
 }

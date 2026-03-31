@@ -97,20 +97,15 @@ export function Sidebar() {
           <BookOpen className="h-4 w-4 shrink-0" />
           RAG <Soon />
         </span>
-        <span
-          className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
-          title="Phase 7"
-        >
+        <NavLink to="/agents" className={linkClass}>
           <Bot className="h-4 w-4 shrink-0" />
-          Agents <Soon />
-        </span>
-        <span
-          className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
-          title="Phase 8"
-        >
+          Agents
+        </NavLink>
+        <NavLink to="/flows" className={linkClass}>
           <GitBranch className="h-4 w-4 shrink-0" />
-          Flows <Soon />
-        </span>
+          Flows{' '}
+          <span className="text-[10px] text-muted-foreground font-normal">(beta)</span>
+        </NavLink>
       </nav>
       <div className="mt-auto border-t border-border p-3">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">

@@ -8,6 +8,10 @@ import { ImportPage } from '@/pages/ImportPage.jsx'
 import { PersonasPage } from '@/pages/PersonasPage.jsx'
 import { PlaceholderPage } from '@/pages/PlaceholderPage.jsx'
 import { GpuPage } from '@/pages/GpuPage.jsx'
+import { AgentsPage } from '@/pages/AgentsPage.jsx'
+import { AgentEditorPage } from '@/pages/AgentEditorPage.jsx'
+import { FlowsPage } from '@/pages/FlowsPage.jsx'
+import { FlowEditorPage } from '@/pages/FlowEditorPage.jsx'
 
 export default function App() {
   return (
@@ -23,12 +27,12 @@ export default function App() {
           <Route path="/personas" element={<PersonasPage />} />
           <Route path="/gpu" element={<GpuPage />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />
-          <Route path="/agents" element={<PlaceholderPage title="Agents" phase="Phase 7" />} />
-          <Route path="/agents/new" element={<PlaceholderPage title="New Agent" phase="Phase 7" />} />
-          <Route path="/agents/:id" element={<PlaceholderPage title="Agent" phase="Phase 7" />} />
-          <Route path="/flows" element={<PlaceholderPage title="Flows" phase="Phase 8" />} />
-          <Route path="/flows/new" element={<PlaceholderPage title="New Flow" phase="Phase 8" />} />
-          <Route path="/flows/:id" element={<PlaceholderPage title="Flow" phase="Phase 8" />} />
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/new" element={<AgentEditorPage />} />
+          <Route path="/agents/:id" element={<AgentEditorPage />} />
+          <Route path="/flows" element={<FlowsPage />} />
+          <Route path="/flows/new" element={<FlowEditorPage />} />
+          <Route path="/flows/:id" element={<FlowEditorPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

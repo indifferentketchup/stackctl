@@ -14,6 +14,10 @@ export function fetchSshStatus() {
  * @param {(obj: { type: string, line?: string, message?: string, success?: boolean }) => void} onEvent
  * @param {AbortSignal} [signal]
  */
+export function pullAndCreateStream(body, onEvent, signal) {
+  return consumeModelsSsePost('/api/models/pull-and-create', body, onEvent, signal)
+}
+
 export async function consumeModelsSsePost(path, body, onEvent, signal) {
   const res = await fetch(path, {
     method: 'POST',
