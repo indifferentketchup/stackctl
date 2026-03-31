@@ -27,6 +27,35 @@ def powershell_single_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+NSSM_EXE = r"C:\Tools\nssm.exe"
+OLLAMA_SERVICE = "OllamaService"
+
+
+def _cmd_double_quoted_token(s: str) -> str:
+    return '"' + s.replace('"', '""') + '"'
+
+
+def nssm_cmd_get_app_environment_extra() -> str:
+    return (
+        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} get "
+        f"{OLLAMA_SERVICE} AppEnvironmentExtra"
+    )
+
+
+def nssm_cmd_set_app_environment_extra(pairs: list[str]) -> str:
+    args = " ".join(_cmd_double_quoted_token(p) for p in pairs)
+    return (
+        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} set "
+        f"{OLLAMA_SERVICE} AppEnvironmentExtra {args}"
+    )
+
+
+def nssm_cmd_service_action(action: str) -> str:
+    return (
+        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} {action} {OLLAMA_SERVICE}"
+    )
+
+
 async def connect_sam_desktop() -> asyncssh.SSHClientConnection:
     host = sam_desktop_host()
     user = sam_desktop_user()
