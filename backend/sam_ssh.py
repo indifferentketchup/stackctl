@@ -27,7 +27,7 @@ def powershell_single_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-NSSM_EXE = r"C:\Tools\nssm.exe"
+NSSM_EXE = r"C:\Tools\nssm\nssm.exe"
 OLLAMA_SERVICE = "OllamaService"
 
 
