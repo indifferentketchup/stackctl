@@ -28,7 +28,7 @@ def powershell_single_quote(s: str) -> str:
 
 
 NSSM_EXE = r"C:\Tools\nssm\nssm.exe"
-OLLAMA_SERVICE = "OllamaService"
+OLLAMA_SERVICE = "ollama"
 
 
 def _cmd_double_quoted_token(s: str) -> str:
