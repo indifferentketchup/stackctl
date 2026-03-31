@@ -189,7 +189,7 @@ async def _connect_sam_desktop() -> asyncssh.SSHClientConnection:
                 host,
                 username=user,
                 client_keys=[key_path],
-                known_hosts=[],
+                known_hosts=None,
             ),
             timeout=15.0,
         )
