@@ -16,7 +16,7 @@ ollamactl is a full-featured web dashboard for managing a remote Ollama instance
 |---|---|
 | Frontend | React 18 + Vite + Tailwind + shadcn/ui |
 | Backend | FastAPI + Python 3.12 |
-| Database | SQLite (agents, flows, RAG sources) |
+| Database | SQLite (agents, flows, RAG sources, GPU env desired state) |
 | Ollama | `100.101.41.16:11434` (sam-desktop, RTX 5090 + 4080 Super) |
 | Persona sync | boolab API at `100.114.205.53:9300` |
 | Container | Docker Compose at `/opt/ollamactl/` |
@@ -101,18 +101,21 @@ Three import paths:
 - Supported: `q8_0`, `q4_K_S`, `q4_K_M`
 - Explanation of each with VRAM impact estimate
 
-### Phase 5 — Multi-GPU Configuration
-- Detects GPUs via Ollama's `/api/ps` and system info
-- Current GPU assignment display (RTX 5090 + 4080 Super)
-- Environment variable editor for Ollama NSSM service on sam-desktop:
-  - `OLLAMA_GPU_LAYERS` — split layers across GPUs
-  - `CUDA_VISIBLE_DEVICES` — GPU selection/ordering
-  - `OLLAMA_MAX_LOADED_MODELS` — concurrent model limit
-  - `OLLAMA_KEEP_ALIVE` — VRAM retention duration
-  - `OLLAMA_FLASH_ATTENTION` — flash attention toggle
-  - `OLLAMA_KV_CACHE_TYPE` — KV cache quantization (f16, q8_0, q4_0)
-- Sends env changes to sam-desktop via Ollama management endpoint or SSH command (TBD)
-- Explains KV cache quantization: f16 (default, full quality), q8_0 (good tradeoff), q4_0 (max savings)
+### Phase 5 — Multi-GPU configuration
+**Where it runs:** The dashboard lives on the homelab control plane; Ollama runs on **sam-desktop** (Windows 11) as an **NSSM** service. ollamactl does **not** push env changes to Windows automatically — it shows live Ollama status, stores the **desired** config in SQLite, and generates **PowerShell + nssm** commands you run on sam-desktop.
+
+- **Live status** — `GET {OLLAMA_URL}/api/ps` and `/api/version` via backend `GET /api/gpu/status` (loaded models, VRAM hints, version; GPU names may be sparse depending on Ollama)
+- **Hardware reference** — Static summary on the GPU page (RTX 5090 + 4080 Super, NSSM path note)
+- **Environment variables** (per-key save into SQLite `gpu_config`):
+  - `CUDA_VISIBLE_DEVICES` — which GPUs and order
+  - `OLLAMA_GPU_LAYERS` — optional layer offload count (empty = auto)
+  - `OLLAMA_MAX_LOADED_MODELS` — concurrent loaded models (1–8)
+  - `OLLAMA_KEEP_ALIVE` — retention after last use (`30m`, `1h`, `0`, `-1`, …)
+  - `OLLAMA_FLASH_ATTENTION` — on/off
+  - `OLLAMA_KV_CACHE_TYPE` — `f16`, `q8_0`, or `q4_0` with VRAM estimate callouts (approximate)
+- **Preset strategies** — One-click “Apply” loads stored values for common setups (single GPU, dual-GPU auto-split, two models at once)
+- **Apply section** — Renders `nssm set … AppEnvironmentExtra` + `nssm restart` for copying; **Copy commands**, **Mark as applied** (baseline in `gpu_config_baseline`), and **pending changes** when stored config differs from last marked baseline
+- Admin-only API: `GET /api/gpu/status`, `GET/PUT /api/gpu/config`, `POST /api/gpu/mark-applied` (`backend/routers/gpu.py`)
 
 ### Phase 6 — RAG Control
 - Document upload (PDF, DOCX, TXT, MD)

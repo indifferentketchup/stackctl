@@ -67,7 +67,7 @@ export function ModelfilePage() {
   const [guided, setGuided] = useState(() => defaultGuidedState())
   const [rawText, setRawText] = useState('')
   const [rawErrors, setRawErrors] = useState([])
-  const [syncWarnings, setSyncWarnings] = useState([])
+  const [syncNote, setSyncNote] = useState(null)
   const [modelName, setModelName] = useState('')
   const [previewOpen, setPreviewOpen] = useState(false)
   const [createStatus, setCreateStatus] = useState('')
@@ -103,9 +103,13 @@ export function ModelfilePage() {
     if (!showData?.modelfile) return
     const text = String(showData.modelfile)
     setRawText(text)
-    const { state, warnings } = parseModelfileToGuided(text)
+    const { state, unknownInstructionCount } = parseModelfileToGuided(text)
     setGuided((g) => ({ ...g, ...state }))
-    setSyncWarnings(warnings)
+    setSyncNote(
+      unknownInstructionCount > 0
+        ? `${unknownInstructionCount} unknown instruction(s) preserved in raw mode only`
+        : null,
+    )
   }, [showData])
 
   const built = useMemo(() => buildModelfileFromGuided(guided), [guided])
@@ -132,9 +136,13 @@ export function ModelfilePage() {
       setRawText(buildModelfileFromGuided(guided))
     }
     if (v === 'guided' && tab === 'raw') {
-      const { state, warnings } = parseModelfileToGuided(rawText)
+      const { state, unknownInstructionCount } = parseModelfileToGuided(rawText)
       setGuided((g) => ({ ...g, ...state }))
-      setSyncWarnings(warnings)
+      setSyncNote(
+        unknownInstructionCount > 0
+          ? `${unknownInstructionCount} unknown instruction(s) preserved in raw mode only`
+          : null,
+      )
     }
     setTab(v)
   }
@@ -207,14 +215,9 @@ export function ModelfilePage() {
         </div>
       </div>
 
-      {syncWarnings.length > 0 && (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-          Some lines could not be mapped to guided fields:
-          <ul className="mt-1 list-disc pl-4">
-            {syncWarnings.slice(0, 6).map((w) => (
-              <li key={w}>{w}</li>
-            ))}
-          </ul>
+      {syncNote && (
+        <div className="rounded-md border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+          {syncNote}
         </div>
       )}
 
