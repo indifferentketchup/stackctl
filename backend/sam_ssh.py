@@ -92,14 +92,14 @@ async def remote_temp_modelfile_path(conn: asyncssh.SSHClientConnection, fname: 
 
 async def ssh_write_file(conn: asyncssh.SSHClientConnection, remote_path: str, content: str) -> None:
     data = content.encode("utf-8")
-    async with conn.start_sftp() as sftp:
+    async with conn.start_sftp_client() as sftp:
         async with sftp.open(remote_path, "wb") as f:
             await f.write(data)
 
 
 async def ssh_remove_file(conn: asyncssh.SSHClientConnection, remote_path: str) -> None:
     try:
-        async with conn.start_sftp() as sftp:
+        async with conn.start_sftp_client() as sftp:
             await sftp.remove(remote_path)
     except (OSError, asyncssh.Error):
         pass
