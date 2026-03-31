@@ -1,19 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Copy, Loader2, Monitor } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { ChevronDown, Loader2, Monitor } from 'lucide-react'
 import {
-  getGpuConfig,
+  applyNssmEnv,
+  fetchNssmEnv,
+  fetchOllamaServiceStatus,
   getGpuStatus,
-  markGpuConfigApplied,
-  putGpuConfig,
+  restartOllama,
+  startOllama,
+  stopOllama,
 } from '@/api/gpu.js'
-import { Badge } from '@/components/ui/badge.jsx'
+import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
+import { cn } from '@/lib/utils.js'
 
-const SAM_DESKTOP_TAILSCALE = '100.101.41.16'
+const SAM_DESKTOP_LABEL = 'sam-desktop'
 
 const ENV_DEFAULTS = {
   CUDA_VISIBLE_DEVICES: '0,1',
@@ -22,9 +31,11 @@ const ENV_DEFAULTS = {
   OLLAMA_KEEP_ALIVE: '30m',
   OLLAMA_FLASH_ATTENTION: '0',
   OLLAMA_KV_CACHE_TYPE: 'f16',
+  OLLAMA_NUM_PARALLEL: '',
+  OLLAMA_HOST: '0.0.0.0:11434',
 }
 
-const TRACKED_KEYS = Object.keys(ENV_DEFAULTS)
+const FORM_KEYS = Object.keys(ENV_DEFAULTS)
 
 function formatBytes(n) {
   if (n == null || Number.isNaN(Number(n))) return '—'
@@ -38,10 +49,10 @@ function formatBytes(n) {
   return `${gb.toFixed(2)} GB`
 }
 
-function effectiveConfig(configMap) {
+function mergeEnvFromNssm(env) {
   const out = { ...ENV_DEFAULTS }
-  const src = configMap && typeof configMap === 'object' ? configMap : {}
-  for (const k of TRACKED_KEYS) {
+  const src = env && typeof env === 'object' ? env : {}
+  for (const k of FORM_KEYS) {
     if (Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined && src[k] !== null) {
       out[k] = String(src[k])
     }
@@ -49,55 +60,43 @@ function effectiveConfig(configMap) {
   return out
 }
 
-function buildPowerShell(env) {
-  const pairs = []
-  pairs.push(`"CUDA_VISIBLE_DEVICES=${env.CUDA_VISIBLE_DEVICES}" \\`)
-  if (env.OLLAMA_GPU_LAYERS.trim()) {
-    pairs.push(`"OLLAMA_GPU_LAYERS=${env.OLLAMA_GPU_LAYERS.trim()}" \\`)
+function envPayload(draft) {
+  const o = {}
+  for (const k of FORM_KEYS) {
+    o[k] = draft[k] ?? ''
   }
-  pairs.push(`"OLLAMA_MAX_LOADED_MODELS=${env.OLLAMA_MAX_LOADED_MODELS}" \\`)
-  pairs.push(`"OLLAMA_KEEP_ALIVE=${env.OLLAMA_KEEP_ALIVE}" \\`)
-  pairs.push(`"OLLAMA_FLASH_ATTENTION=${env.OLLAMA_FLASH_ATTENTION === '1' ? '1' : '0'}" \\`)
-  pairs.push(`"OLLAMA_KV_CACHE_TYPE=${env.OLLAMA_KV_CACHE_TYPE}"`)
-
-  const lines = [
-    '# Apply Ollama NSSM environment variables',
-    `# Run these commands in PowerShell on sam-desktop (${SAM_DESKTOP_TAILSCALE})`,
-    '# ollamactl only generates this script — it does NOT run it.',
-    '',
-    'C:\\Tools\\nssm set OllamaService AppEnvironmentExtra `',
-    ...pairs,
-    '',
-    '# Restart the service to apply changes',
-    'C:\\Tools\\nssm restart OllamaService',
-  ]
-  return lines.join('\n')
+  return o
 }
 
 const PRESETS = [
   {
-    id: 'a',
-    title: 'Configuration A: Single GPU (current)',
+    id: 'single',
+    title: 'Single GPU (RTX 5090 only)',
     body: `CUDA_VISIBLE_DEVICES=0
 OLLAMA_MAX_LOADED_MODELS=1`,
-    desc: 'Best for large models (27B+). All VRAM on RTX 5090.',
+    desc: 'Uses only the primary GPU. Good for large single-GPU workloads.',
     values: { CUDA_VISIBLE_DEVICES: '0', OLLAMA_MAX_LOADED_MODELS: '1' },
   },
   {
-    id: 'b',
-    title: 'Configuration B: Dual GPU auto-split',
+    id: 'dual',
+    title: 'Dual GPU Auto-Split',
     body: `CUDA_VISIBLE_DEVICES=0,1
 OLLAMA_MAX_LOADED_MODELS=1`,
-    desc: 'Best for very large models split across both GPUs. Ollama distributes layers automatically.',
+    desc: 'Expose both GPUs to Ollama for automatic layer split across devices.',
     values: { CUDA_VISIBLE_DEVICES: '0,1', OLLAMA_MAX_LOADED_MODELS: '1' },
   },
   {
-    id: 'c',
-    title: 'Configuration C: Two models simultaneously',
+    id: 'two-models',
+    title: 'Two Models Simultaneously',
     body: `CUDA_VISIBLE_DEVICES=0,1
-OLLAMA_MAX_LOADED_MODELS=2`,
-    desc: 'Best for running a smaller model on the 4080 Super while a larger model uses the 5090.',
-    values: { CUDA_VISIBLE_DEVICES: '0,1', OLLAMA_MAX_LOADED_MODELS: '2' },
+OLLAMA_MAX_LOADED_MODELS=2
+OLLAMA_KEEP_ALIVE=30m`,
+    desc: 'Allows two loaded models with a typical keep-alive retention.',
+    values: {
+      CUDA_VISIBLE_DEVICES: '0,1',
+      OLLAMA_MAX_LOADED_MODELS: '2',
+      OLLAMA_KEEP_ALIVE: '30m',
+    },
   },
 ]
 
@@ -109,315 +108,458 @@ export function GpuPage() {
     refetchInterval: 15_000,
     retry: false,
   })
-  const qConfig = useQuery({
-    queryKey: ['gpu-config'],
-    queryFn: getGpuConfig,
+  const qSvc = useQuery({
+    queryKey: ['gpu-ollama-service-status'],
+    queryFn: fetchOllamaServiceStatus,
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const qNssm = useQuery({
+    queryKey: ['gpu-nssm-env'],
+    queryFn: fetchNssmEnv,
     retry: false,
   })
 
-  const serverConfig = qConfig.data?.config
-  const effective = useMemo(() => effectiveConfig(serverConfig), [serverConfig])
   const [draft, setDraft] = useState(() => ({ ...ENV_DEFAULTS }))
-
   useEffect(() => {
-    if (serverConfig) setDraft(effectiveConfig(serverConfig))
-  }, [serverConfig])
-
-  const putMut = useMutation({
-    mutationFn: ({ key, value }) => putGpuConfig(key, value),
-    onSuccess: (data) => {
-      qc.setQueryData(['gpu-config'], data)
-    },
-  })
-
-  const appliedMut = useMutation({
-    mutationFn: markGpuConfigApplied,
-    onSuccess: (data) => {
-      qc.setQueryData(['gpu-config'], data)
-    },
-  })
-
-  const pending = !!qConfig.data?.pending_changes
-  const script = useMemo(() => buildPowerShell(effective), [effective])
-
-  const copyScript = useCallback(() => {
-    navigator.clipboard?.writeText(script).catch(() => {})
-  }, [script])
-
-  const saveRow = (key, value) => {
-    putMut.mutate({ key, value })
-    setDraft((d) => ({ ...d, [key]: value }))
-  }
-
-  const applyPreset = async (preset) => {
-    const entries = Object.entries(preset.values)
-    let last = qConfig.data
-    for (const [key, value] of entries) {
-      last = await putGpuConfig(key, value)
-      setDraft((d) => ({ ...d, [key]: value }))
+    if (qNssm.data?.env && !qNssm.data.error) {
+      setDraft(mergeEnvFromNssm(qNssm.data.env))
     }
-    qc.setQueryData(['gpu-config'], last)
-  }
+  }, [qNssm.data])
 
-  const running = qStatus.data?.running_models
-  const runList = Array.isArray(running) ? running : []
-  const vramBytes = qStatus.data?.vram_used_bytes
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalLines, setTerminalLines] = useState([])
+  const [terminalRunning, setTerminalRunning] = useState(false)
+  const [terminalResult, setTerminalResult] = useState(null)
+  const [needsRestartHint, setNeedsRestartHint] = useState(false)
+  const [applyBusy, setApplyBusy] = useState(false)
+  const [hwRefOpen, setHwRefOpen] = useState(false)
+
+  const svcStatus = qSvc.data?.status ?? 'Unknown'
+  const isRunning = svcStatus === 'Running'
+  const isStopped = svcStatus === 'Stopped'
+
+  const runningModels = useMemo(() => {
+    const rm = qStatus.data?.running_models
+    return Array.isArray(rm) ? rm : []
+  }, [qStatus.data])
+
+  const runStream = useCallback(async (label, run) => {
+    setTerminalOpen(true)
+    setTerminalRunning(true)
+    setTerminalResult(null)
+    setTerminalLines((prev) => (label && prev.length ? [...prev, `--- ${label} ---`] : label ? [label] : []))
+
+    let sawDone = false
+    let sawErr = false
+    try {
+      await run((ev) => {
+        if (ev.type === 'log' && ev.line != null) {
+          setTerminalLines((p) => [...p, String(ev.line)])
+        }
+        if (ev.type === 'error') {
+          sawErr = true
+          setTerminalLines((p) => [...p, ev.message || 'Error'])
+          setTerminalResult('failed')
+        }
+        if (ev.type === 'done' && ev.success) {
+          sawDone = true
+          if (ev.ollama_version != null && String(ev.ollama_version).length) {
+            setTerminalLines((p) => [...p, `Ollama version: ${ev.ollama_version}`])
+          }
+          setTerminalResult('success')
+        }
+      })
+      if (!sawDone && !sawErr) {
+        setTerminalLines((p) => [...p, 'Stream ended without completion'])
+        setTerminalResult('failed')
+      }
+      return sawDone && !sawErr
+    } catch (e) {
+      const msg = e.message || 'Failed'
+      setTerminalLines((p) => [...p, msg])
+      setTerminalResult('failed')
+      return false
+    } finally {
+      setTerminalRunning(false)
+    }
+  }, [])
+
+  const openFreshTerminal = useCallback(() => {
+    setTerminalLines([])
+    setTerminalResult(null)
+    setTerminalOpen(true)
+    setTerminalRunning(true)
+  }, [])
+
+  const handleApplyOnly = useCallback(async () => {
+    const n = Number(draft.OLLAMA_MAX_LOADED_MODELS)
+    if (!Number.isInteger(n) || n < 1 || n > 8) {
+      openFreshTerminal()
+      setTerminalRunning(false)
+      setTerminalOpen(true)
+      setTerminalLines(['OLLAMA_MAX_LOADED_MODELS must be an integer 1–8.'])
+      setTerminalResult('failed')
+      return
+    }
+    setApplyBusy(true)
+    const ok = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent))
+    setApplyBusy(false)
+    if (ok) {
+      setNeedsRestartHint(true)
+      qc.invalidateQueries({ queryKey: ['gpu-nssm-env'] })
+    }
+  }, [draft, openFreshTerminal, qc, runStream])
+
+  const handleRestartOnly = useCallback(async () => {
+    setApplyBusy(true)
+    const ok = await runStream('', (onEvent) => restartOllama(onEvent))
+    setApplyBusy(false)
+    if (ok) {
+      setNeedsRestartHint(false)
+      qc.invalidateQueries({ queryKey: ['gpu-status'] })
+      qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
+      qc.invalidateQueries({ queryKey: ['gpu-nssm-env'] })
+    }
+  }, [qc, runStream])
+
+  const handleApplyAndRestart = useCallback(async () => {
+    const n = Number(draft.OLLAMA_MAX_LOADED_MODELS)
+    if (!Number.isInteger(n) || n < 1 || n > 8) {
+      openFreshTerminal()
+      setTerminalRunning(false)
+      setTerminalOpen(true)
+      setTerminalLines(['OLLAMA_MAX_LOADED_MODELS must be an integer 1–8.'])
+      setTerminalResult('failed')
+      return
+    }
+    setApplyBusy(true)
+    const ok1 = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent))
+    if (!ok1) {
+      setApplyBusy(false)
+      return
+    }
+    setTerminalLines((p) => [...p, '--- restart OllamaService ---'])
+    setTerminalRunning(true)
+    setTerminalResult(null)
+    let sawDone = false
+    let sawErr = false
+    try {
+      await restartOllama((ev) => {
+        if (ev.type === 'log' && ev.line != null) {
+          setTerminalLines((p2) => [...p2, String(ev.line)])
+        }
+        if (ev.type === 'error') {
+          sawErr = true
+          setTerminalLines((p2) => [...p2, ev.message || 'Error'])
+          setTerminalResult('failed')
+        }
+        if (ev.type === 'done' && ev.success) {
+          sawDone = true
+          if (ev.ollama_version != null && String(ev.ollama_version).length) {
+            setTerminalLines((p2) => [...p2, `Ollama version: ${ev.ollama_version}`])
+          }
+          setTerminalResult('success')
+        }
+      })
+      if (!sawDone && !sawErr) {
+        setTerminalLines((p) => [...p, 'Stream ended without completion'])
+        setTerminalResult('failed')
+      }
+      if (sawDone && !sawErr) {
+        setNeedsRestartHint(false)
+        qc.invalidateQueries({ queryKey: ['gpu-status'] })
+        qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
+        qc.invalidateQueries({ queryKey: ['gpu-nssm-env'] })
+      }
+    } catch (e) {
+      setTerminalLines((p) => [...p, e.message || 'Failed'])
+      setTerminalResult('failed')
+    } finally {
+      setTerminalRunning(false)
+      setApplyBusy(false)
+    }
+  }, [draft, qc, runStream])
+
+  const handleStop = useCallback(async () => {
+    setApplyBusy(true)
+    const ok = await runStream('', (onEvent) => stopOllama(onEvent))
+    setApplyBusy(false)
+    if (ok) {
+      qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
+      qc.invalidateQueries({ queryKey: ['gpu-status'] })
+    }
+  }, [qc, runStream])
+
+  const handleStart = useCallback(async () => {
+    setApplyBusy(true)
+    const ok = await runStream('', (onEvent) => startOllama(onEvent))
+    setApplyBusy(false)
+    if (ok) {
+      qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
+      qc.invalidateQueries({ queryKey: ['gpu-status'] })
+    }
+  }, [qc, runStream])
+
+  const loadPreset = useCallback((preset) => {
+    setDraft((d) => ({ ...d, ...preset.values }))
+  }, [])
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold">GPU &amp; Inference Config</h1>
         <p className="text-sm text-muted-foreground">
-          Tune how Ollama uses GPUs on sam-desktop. This UI runs on the homelab control plane; NSSM changes must be
-          executed on Windows at {SAM_DESKTOP_TAILSCALE}.
+          NSSM environment and Ollama service on {SAM_DESKTOP_LABEL} are updated live over SSH from this control plane.
         </p>
       </header>
 
-      <Card className="border-amber-500/40 bg-amber-500/10">
-        <CardContent className="flex gap-3 py-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
-          <div className="space-y-1">
-            <p className="font-medium text-amber-100">Runs on sam-desktop, not the homelab</p>
-            <p className="text-muted-foreground">
-              ollamactl cannot edit the NSSM service environment remotely. Saving values here stores your{' '}
-              <strong>desired</strong> config in SQLite and generates PowerShell for you to paste on sam-desktop.
+      <Card>
+        <CardHeader className="flex flex-row items-start gap-3 space-y-0 pb-2">
+          <Monitor className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle className="text-base">OllamaService</CardTitle>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium',
+                  isRunning && 'border-emerald-500/50 text-emerald-400',
+                  isStopped && 'border-muted-foreground/40 text-muted-foreground',
+                  !isRunning && !isStopped && 'border-amber-500/40 text-amber-200',
+                )}
+              >
+                <span
+                  className={cn(
+                    'h-2 w-2 rounded-full',
+                    isRunning && 'bg-emerald-400',
+                    isStopped && 'bg-muted-foreground',
+                    !isRunning && !isStopped && 'bg-amber-400',
+                  )}
+                  aria-hidden
+                />
+                {svcStatus}
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {(() => {
+                const ver = qStatus.data?.ollama_version
+                if (ver) {
+                  const s = String(ver)
+                  const shown = s.toLowerCase().startsWith('v') ? s : `v${s}`
+                  return `${shown} on ${SAM_DESKTOP_LABEL}`
+                }
+                if (qStatus.isLoading) return `Loading Ollama version…`
+                return `— on ${SAM_DESKTOP_LABEL}`
+              })()}
+              {runningModels.length > 0 || qStatus.data?.vram_used_bytes != null ? (
+                <>
+                  {' · '}
+                  {qStatus.data?.gpu_info ? `${qStatus.data.gpu_info} · ` : ''}
+                  {runningModels.length} model{runningModels.length === 1 ? '' : 's'} loaded
+                  {qStatus.data?.vram_used_bytes != null
+                    ? ` · ${formatBytes(qStatus.data.vram_used_bytes)} VRAM`
+                    : ''}
+                </>
+              ) : null}
             </p>
+            {qSvc.data?.raw ? (
+              <p className="font-mono-ui text-[11px] text-muted-foreground/80">nssm: {qSvc.data.raw}</p>
+            ) : null}
           </div>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2">
+          {isRunning && (
+            <>
+              <Button type="button" variant="destructive" size="sm" disabled={applyBusy} onClick={handleStop}>
+                Stop
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={applyBusy || !isRunning}
+                onClick={handleRestartOnly}
+              >
+                Restart
+              </Button>
+            </>
+          )}
+          {isStopped && (
+            <Button type="button" size="sm" disabled={applyBusy} onClick={handleStart}>
+              Start
+            </Button>
+          )}
+          {!isRunning && !isStopped && (
+            <>
+              <Button type="button" variant="secondary" size="sm" disabled={applyBusy} onClick={handleStart}>
+                Start
+              </Button>
+              <Button type="button" variant="outline" size="sm" disabled={applyBusy} onClick={handleStop}>
+                Stop
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={applyBusy || !isRunning}
+                onClick={handleRestartOnly}
+              >
+                Restart
+              </Button>
+            </>
+          )}
         </CardContent>
       </Card>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Current status</h2>
-        {qStatus.isLoading && (
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            Loading…
-          </div>
-        )}
-        {qStatus.isError && (
-          <Card className="border-destructive/50 bg-destructive/10">
-            <CardContent className="py-4 text-sm text-destructive">
-              Could not load GPU status. Set{' '}
-              <code className="font-mono-ui">boolab_owner_token</code> in localStorage to match the API token, or
-              enable <code className="font-mono-ui">OLLAMACTL_SKIP_AUTH</code> for local dev.
-            </CardContent>
-          </Card>
-        )}
-        {qStatus.data && (
-          <Card>
-            <CardHeader className="flex flex-row items-start gap-2 space-y-0">
-              <Monitor className="h-5 w-5 shrink-0 text-primary" />
-              <CardTitle className="text-base">Live Ollama</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <div className="flex flex-wrap justify-between gap-2">
-                <span className="text-muted-foreground">Ollama version</span>
-                <span className="font-mono-ui font-medium">{qStatus.data.ollama_version ?? '—'}</span>
-              </div>
-              <div className="flex flex-wrap justify-between gap-2">
-                <span className="text-muted-foreground">Running models</span>
-                <span className="font-medium">{runList.length}</span>
-              </div>
-              <div className="flex flex-wrap justify-between gap-2">
-                <span className="text-muted-foreground">VRAM in use (reported)</span>
-                <span className="font-medium">{formatBytes(vramBytes)}</span>
-              </div>
-              <div className="flex flex-wrap justify-between gap-2">
-                <span className="text-muted-foreground">GPU info from API</span>
-                <span className="max-w-[min(100%,24rem)] text-right font-medium">
-                  {qStatus.data.gpu_info ?? '— (Ollama often omits GPU names in /api/ps)'}
-                </span>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Hardware (known setup)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <pre className="overflow-x-auto rounded-md border border-border bg-muted/40 p-4 font-mono-ui text-xs leading-relaxed md:text-sm">
-              {`sam-desktop — Windows 11
-├── RTX 5090 — 32GB VRAM (GPU 0)
-└── RTX 4080 Super — 16GB VRAM (GPU 1, pending setup)
-Ollama: NSSM service at D:\\ollama\\ollama.exe`}
-            </pre>
+      {(qStatus.isError || qNssm.isError) && (
+        <Card className="border-destructive/50 bg-destructive/10">
+          <CardContent className="py-4 text-sm text-destructive">
+            {qStatus.isError && <p>Could not load Ollama GPU status (admin token required for /api/gpu/status).</p>}
+            {qNssm.isError && <p>Could not load NSSM environment from SSH (admin token required).</p>}
           </CardContent>
         </Card>
-      </section>
+      )}
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Environment variable config</h2>
+      {qNssm.data?.error && (
+        <Card className="border-amber-500/40 bg-amber-500/10">
+          <CardContent className="py-4 text-sm text-amber-100">
+            NSSM env: {qNssm.data.error}
+          </CardContent>
+        </Card>
+      )}
+
+      {needsRestartHint && (
+        <Card className="border-sky-500/40 bg-sky-950/30">
+          <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-sky-100">Restart Ollama to apply environment changes.</p>
+            <Button type="button" size="sm" variant="secondary" disabled={applyBusy} onClick={handleRestartOnly}>
+              Restart Ollama
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      <section className="space-y-4">
+        <h2 className="text-lg font-semibold">Environment variables</h2>
         <p className="text-sm text-muted-foreground">
-          Stored values drive the generated NSSM script. Defaults apply when a key is not saved yet.
+          Values load from NSSM on the remote host. Applying updates <code className="font-mono-ui text-xs">AppEnvironmentExtra</code>{' '}
+          for <code className="font-mono-ui text-xs">OllamaService</code>.
         </p>
 
-        {qConfig.isError && (
-          <Card className="border-destructive/50 bg-destructive/10">
-            <CardContent className="py-4 text-sm text-destructive">
-              Could not load saved config (admin token required).
-            </CardContent>
-          </Card>
+        {qNssm.isLoading && (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            Loading NSSM environment…
+          </div>
         )}
 
         <div className="space-y-4">
           <EnvRow
             label="CUDA_VISIBLE_DEVICES"
+            hint="0 = RTX 5090 only; 0,1 = both"
             draft={draft.CUDA_VISIBLE_DEVICES}
-            stored={effective.CUDA_VISIBLE_DEVICES}
-            defaultHint="0,1"
-            explanation="Controls which GPUs Ollama uses and their order. 0 = RTX 5090 only. 0,1 = both. 1,0 = 4080 Super first."
-            example="0,1"
-            onDraft={(v) => setDraft((d) => ({ ...d, CUDA_VISIBLE_DEVICES: v }))}
-            onSave={(v) => saveRow('CUDA_VISIBLE_DEVICES', v)}
-            disabled={putMut.isPending}
+            onChange={(v) => setDraft((d) => ({ ...d, CUDA_VISIBLE_DEVICES: v }))}
           />
-          <EnvRow
-            label="OLLAMA_GPU_LAYERS"
-            draft={draft.OLLAMA_GPU_LAYERS}
-            stored={effective.OLLAMA_GPU_LAYERS}
-            defaultHint="(empty = auto)"
-            explanation="Number of layers to offload to GPU. Leave empty for automatic behavior. Useful for partial offload on very large models."
-            example="32"
-            onDraft={(v) => setDraft((d) => ({ ...d, OLLAMA_GPU_LAYERS: v }))}
-            onSave={(v) => saveRow('OLLAMA_GPU_LAYERS', v)}
-            disabled={putMut.isPending}
-          />
+          <div className="rounded-md border border-border bg-card p-4 space-y-3">
+            <Label className="font-mono-ui text-sm">OLLAMA_GPU_LAYERS</Label>
+            <p className="text-sm text-muted-foreground">Layers on GPU; empty = auto.</p>
+            <Input
+              type="number"
+              className="font-mono-ui sm:max-w-xs"
+              placeholder="(empty = auto)"
+              value={draft.OLLAMA_GPU_LAYERS}
+              onChange={(e) => setDraft((d) => ({ ...d, OLLAMA_GPU_LAYERS: e.target.value }))}
+            />
+          </div>
           <div className="rounded-md border border-border bg-card p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Label className="font-mono-ui text-sm">OLLAMA_MAX_LOADED_MODELS</Label>
-              <span className="text-xs text-muted-foreground">default: 1 · range 1–8</span>
+              <span className="text-xs text-muted-foreground">1–8</span>
             </div>
-            <p className="text-sm text-muted-foreground">
-              Max models loaded in VRAM at once. Use 2 to keep a 9B model on the 4080 Super while a larger model uses
-              the 5090.
-            </p>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <Input
-                type="number"
-                min={1}
-                max={8}
-                value={draft.OLLAMA_MAX_LOADED_MODELS}
-                onChange={(e) => setDraft((d) => ({ ...d, OLLAMA_MAX_LOADED_MODELS: e.target.value }))}
-                className="font-mono-ui sm:max-w-xs"
-              />
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={putMut.isPending}
-                onClick={() => {
-                  const n = Number(draft.OLLAMA_MAX_LOADED_MODELS)
-                  if (!Number.isInteger(n) || n < 1 || n > 8) return
-                  saveRow('OLLAMA_MAX_LOADED_MODELS', String(n))
-                }}
-              >
-                Save
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Stored: <span className="font-mono-ui">{effective.OLLAMA_MAX_LOADED_MODELS || '—'}</span>
-            </p>
+            <p className="text-sm text-muted-foreground">Max models in VRAM at once.</p>
+            <Input
+              type="number"
+              min={1}
+              max={8}
+              className="font-mono-ui sm:max-w-xs"
+              value={draft.OLLAMA_MAX_LOADED_MODELS}
+              onChange={(e) => setDraft((d) => ({ ...d, OLLAMA_MAX_LOADED_MODELS: e.target.value }))}
+            />
           </div>
           <EnvRow
             label="OLLAMA_KEEP_ALIVE"
+            hint="e.g. 30m, 1h, 0, -1"
             draft={draft.OLLAMA_KEEP_ALIVE}
-            stored={effective.OLLAMA_KEEP_ALIVE}
-            defaultHint="30m"
-            explanation="How long a model stays in VRAM after last use. Formats: 30m, 1h, 0 (unload immediately), -1 (never unload)."
-            example="30m"
-            onDraft={(v) => setDraft((d) => ({ ...d, OLLAMA_KEEP_ALIVE: v }))}
-            onSave={(v) => saveRow('OLLAMA_KEEP_ALIVE', v)}
-            disabled={putMut.isPending}
+            onChange={(v) => setDraft((d) => ({ ...d, OLLAMA_KEEP_ALIVE: v }))}
           />
           <div className="rounded-md border border-border bg-card p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Label className="font-mono-ui text-sm">OLLAMA_FLASH_ATTENTION</Label>
-              <span className="text-xs text-muted-foreground">default: off · recommended: on</span>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              Reduces VRAM usage with minimal quality impact when supported by the runtime.
-            </p>
+            <Label className="font-mono-ui text-sm">OLLAMA_FLASH_ATTENTION</Label>
+            <p className="text-sm text-muted-foreground">Less VRAM, minimal quality impact when supported.</p>
             <label className="flex cursor-pointer items-center gap-2 text-sm">
               <input
                 type="checkbox"
                 className="h-4 w-4 rounded border-border"
                 checked={draft.OLLAMA_FLASH_ATTENTION === '1'}
-                onChange={(e) => {
-                  const v = e.target.checked ? '1' : '0'
-                  setDraft((d) => ({ ...d, OLLAMA_FLASH_ATTENTION: v }))
-                }}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, OLLAMA_FLASH_ATTENTION: e.target.checked ? '1' : '0' }))
+                }
               />
-              <span>Enable flash attention</span>
+              <span>Enable (1)</span>
             </label>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={putMut.isPending}
-              onClick={() => saveRow('OLLAMA_FLASH_ATTENTION', draft.OLLAMA_FLASH_ATTENTION === '1' ? '1' : '0')}
-            >
-              Save toggle
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Stored:{' '}
-              <span className="font-mono-ui">{effective.OLLAMA_FLASH_ATTENTION === '1' ? '1 (on)' : '0 (off)'}</span>
-            </p>
           </div>
           <div className="rounded-md border border-border bg-card p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Label className="font-mono-ui text-sm">OLLAMA_KV_CACHE_TYPE</Label>
-              <span className="text-xs text-muted-foreground">default: f16</span>
-            </div>
-            <p className="text-sm text-muted-foreground">KV cache quantization (approximate VRAM for a 9B model @ 8K context).</p>
+            <Label className="font-mono-ui text-sm">OLLAMA_KV_CACHE_TYPE</Label>
             <select
               className="flex h-10 w-full max-w-md rounded-md border border-input bg-background px-3 text-sm font-mono-ui"
               value={draft.OLLAMA_KV_CACHE_TYPE}
               onChange={(e) => setDraft((d) => ({ ...d, OLLAMA_KV_CACHE_TYPE: e.target.value }))}
             >
-              <option value="f16">f16 — ~2GB KV @ 8K (estimate)</option>
-              <option value="q8_0">q8_0 — ~1GB @ 8K (estimate) · recommended tradeoff</option>
-              <option value="q4_0">q4_0 — ~500MB @ 8K (estimate) · max savings</option>
+              <option value="f16">f16</option>
+              <option value="q8_0">q8_0</option>
+              <option value="q4_0">q4_0</option>
             </select>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={putMut.isPending}
-              onClick={() => saveRow('OLLAMA_KV_CACHE_TYPE', draft.OLLAMA_KV_CACHE_TYPE)}
-            >
-              Save
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Stored: <span className="font-mono-ui">{effective.OLLAMA_KV_CACHE_TYPE}</span>
+          </div>
+          <div className="rounded-md border border-border bg-card p-4 space-y-2 text-sm text-muted-foreground leading-relaxed">
+            <p>
+              <span className="font-semibold text-foreground">f16</span> — Full precision; best quality; ~2GB per 8K ctx on
+              a 9B model.
+            </p>
+            <p>
+              <span className="font-semibold text-foreground">q8_0</span> — Recommended; ~50% less KV VRAM; minimal quality
+              loss.
+            </p>
+            <p>
+              <span className="font-semibold text-foreground">q4_0</span> — Max savings; ~75% less KV VRAM; more noticeable on
+              long context.
             </p>
           </div>
+          <EnvRow
+            label="OLLAMA_NUM_PARALLEL"
+            hint="empty = auto"
+            draft={draft.OLLAMA_NUM_PARALLEL}
+            onChange={(v) => setDraft((d) => ({ ...d, OLLAMA_NUM_PARALLEL: v }))}
+          />
+          <EnvRow
+            label="OLLAMA_HOST"
+            hint="default 0.0.0.0:11434"
+            draft={draft.OLLAMA_HOST}
+            onChange={(v) => setDraft((d) => ({ ...d, OLLAMA_HOST: v }))}
+          />
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">KV cache types (reference)</CardTitle>
-            <p className="text-xs font-normal text-amber-200/90">
-              Figures below are rough estimates for discussion — not precise benchmarks.
-            </p>
-          </CardHeader>
-          <CardContent className="space-y-4 font-mono-ui text-xs leading-relaxed text-muted-foreground md:text-sm">
-            <div>
-              <p className="font-semibold text-foreground">f16 (default)</p>
-              <p>Full precision KV cache. Best quality. Uses about 2 bytes per token per layer.</p>
-            </div>
-            <div>
-              <p className="font-semibold text-foreground">q8_0 — recommended</p>
-              <p>8-bit quantized KV cache. ~50% memory reduction vs f16. Minimal quality loss for most workloads.</p>
-            </div>
-            <div>
-              <p className="font-semibold text-foreground">q4_0</p>
-              <p>4-bit quantized KV cache. ~75% memory reduction vs f16. More noticeable quality loss on long contexts.</p>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" disabled={applyBusy || qNssm.isLoading} onClick={handleApplyOnly}>
+            Apply changes
+          </Button>
+          <Button type="button" variant="secondary" disabled={applyBusy || qNssm.isLoading} onClick={handleApplyAndRestart}>
+            Apply &amp; restart
+          </Button>
+        </div>
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Multi-GPU split strategy</h2>
+        <h2 className="text-lg font-semibold">GPU presets</h2>
+        <p className="text-sm text-muted-foreground">Load into the form only — does not apply until you click Apply.</p>
         <div className="flex flex-col gap-4">
           {PRESETS.map((p) => (
             <Card key={p.id}>
@@ -427,12 +569,8 @@ Ollama: NSSM service at D:\\ollama\\ollama.exe`}
               <CardContent className="space-y-3 text-sm">
                 <pre className="overflow-x-auto rounded-md bg-muted/40 p-3 font-mono-ui text-xs">{p.body}</pre>
                 <p className="text-muted-foreground">{p.desc}</p>
-                <Button
-                  size="sm"
-                  disabled={putMut.isPending || qConfig.isLoading}
-                  onClick={() => applyPreset(p)}
-                >
-                  Apply preset (saves to SQLite)
+                <Button type="button" size="sm" variant="secondary" onClick={() => loadPreset(p)}>
+                  Load preset
                 </Button>
               </CardContent>
             </Card>
@@ -440,82 +578,45 @@ Ollama: NSSM service at D:\\ollama\\ollama.exe`}
         </div>
       </section>
 
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-semibold">Apply changes on sam-desktop</h2>
-          {pending ? (
-            <Badge variant="amber">Pending changes</Badge>
-          ) : (
-            <Badge variant="secondary">In sync with last “applied” snapshot</Badge>
-          )}
-        </div>
-        <p className="text-sm text-muted-foreground">
-          After you run NSSM on sam-desktop, click “Mark as applied” so the dashboard reflects that the live service
-          should match your stored values.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={copyScript}>
-            <Copy className="mr-2 h-4 w-4" />
-            Copy commands
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled={appliedMut.isPending || qConfig.isLoading}
-            onClick={() => appliedMut.mutate()}
-          >
-            {appliedMut.isPending ? 'Saving…' : 'Mark as applied'}
-          </Button>
-        </div>
-        <Card>
-          <CardContent className="p-0">
-            <pre className="max-h-[28rem] overflow-auto overflow-x-auto rounded-md border border-border bg-muted/50 p-4 font-mono-ui text-[11px] leading-snug text-foreground md:text-xs">
-              {script}
-            </pre>
-          </CardContent>
-        </Card>
-      </section>
+      <Collapsible open={hwRefOpen} onOpenChange={setHwRefOpen} className="rounded-md border border-border">
+        <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium hover:bg-muted/30">
+          Hardware reference
+          <ChevronDown
+            className={cn('h-4 w-4 shrink-0 opacity-60 transition-transform', hwRefOpen && 'rotate-180')}
+          />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <pre className="border-t border-border px-4 py-3 font-mono-ui text-xs leading-relaxed text-muted-foreground md:text-sm">
+            {`${SAM_DESKTOP_LABEL}
+├── CPU: Windows 11
+├── GPU 0: RTX 5090 — 32GB VRAM  
+├── GPU 1: RTX 4080 Super — 16GB VRAM (if installed)
+├── Ollama: NSSM service "OllamaService"
+├── Binary: D:\\ollama\\ollama.exe
+└── NSSM: C:\\Tools\\nssm.exe`}
+          </pre>
+        </CollapsibleContent>
+      </Collapsible>
+
+      <ApplyTerminalPanel
+        open={terminalOpen}
+        onClose={() => setTerminalOpen(false)}
+        lines={terminalLines}
+        running={terminalRunning}
+        result={
+          terminalResult === 'success' ? 'success' : terminalResult === 'failed' ? 'failed' : null
+        }
+      />
     </div>
   )
 }
 
-function EnvRow({
-  label,
-  draft,
-  stored,
-  defaultHint,
-  explanation,
-  example,
-  onDraft,
-  onSave,
-  disabled,
-}) {
+function EnvRow({ label, hint, draft, onChange }) {
   return (
     <div className="rounded-md border border-border bg-card p-4 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <Label className="font-mono-ui text-sm">{label}</Label>
-        <span className="text-xs text-muted-foreground">default: {defaultHint}</span>
-      </div>
-      <p className="text-sm text-muted-foreground">{explanation}</p>
-      <p className="text-xs text-muted-foreground">
-        Example: <span className="font-mono-ui">{example}</span>
-      </p>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <Input
-          type="text"
-          value={draft}
-          onChange={(e) => onDraft(e.target.value)}
-          className="font-mono-ui sm:max-w-lg"
-          placeholder={defaultHint}
-        />
-        <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onSave(draft)}>
-          Save
-        </Button>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Stored: <span className="font-mono-ui">{stored || '—'}</span>
-      </p>
+      <Label className="font-mono-ui text-sm">{label}</Label>
+      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
+      <Input type="text" className="font-mono-ui sm:max-w-lg" value={draft} onChange={(e) => onChange(e.target.value)} />
     </div>
   )
 }
