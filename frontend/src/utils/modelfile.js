@@ -85,7 +85,6 @@ export const DEFAULT_PARAMS = {
   top_k: 40,
   top_p: 0.9,
   min_p: 0,
-  num_ctx: 8192,
   num_predict: -1,
   repeat_penalty: 1,
   repeat_last_n: -1,
@@ -148,7 +147,6 @@ export function buildModelfileFromGuided(s) {
   addParam('top_k', p.top_k)
   addParam('top_p', p.top_p)
   addParam('min_p', p.min_p)
-  addParam('num_ctx', p.num_ctx)
   addParam('num_predict', p.num_predict)
   addParam('repeat_penalty', p.repeat_penalty)
   addParam('repeat_last_n', p.repeat_last_n)
@@ -353,10 +351,7 @@ export function parseModelfileToGuided(text) {
       if (key === 'stop') state.stops.push(val)
       else if (Object.prototype.hasOwnProperty.call(DEFAULT_PARAMS, key)) {
         const num = Number(val)
-        if (!Number.isNaN(num)) {
-          if (key === 'num_ctx') state.params.num_ctx = parseInt(String(val), 10)
-          else state.params[key] = num
-        }
+        if (!Number.isNaN(num)) state.params[key] = num
       }
       i++
       continue

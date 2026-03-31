@@ -43,8 +43,6 @@ import {
   validateRawModelfile,
 } from '@/utils/modelfile.js'
 
-const NUM_CTX = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
-
 const SAMPLE_SYSTEM = `You are a concise, accurate assistant. Answer clearly, admit when you do not know, and follow user instructions.`
 
 function Section({ title, children, defaultOpen = true }) {
@@ -444,28 +442,9 @@ export function ModelfilePage() {
                 </p>
               </div>
             ))}
-            <div className="space-y-1">
-              <Label>num_ctx</Label>
-              <select
-                className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
-                value={guided.params.num_ctx}
-                onChange={(e) =>
-                  setGuided((g) => ({
-                    ...g,
-                    params: { ...g.params, num_ctx: parseInt(e.target.value, 10) },
-                  }))
-                }
-              >
-                {NUM_CTX.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground mt-1">
-                Context window size in tokens. Larger = more memory.
-              </p>
-            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Context window is set per-request in boolab DAW settings, not in the Modelfile.
+            </p>
             {[
               { k: 'num_predict', label: 'num_predict', min: -1, max: 8192, step: 1 },
               { k: 'repeat_last_n', label: 'repeat_last_n', min: -1, max: 512, step: 1 },
