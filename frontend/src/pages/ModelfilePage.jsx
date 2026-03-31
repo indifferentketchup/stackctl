@@ -11,6 +11,9 @@ import {
   Trash2,
 } from 'lucide-react'
 import { createModelStream, listModels, showModel } from '@/api/ollama.js'
+import { consumeModelsSsePost } from '@/api/models.js'
+import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
+import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import {
   Collapsible,
@@ -72,6 +75,10 @@ export function ModelfilePage() {
   const [previewOpen, setPreviewOpen] = useState(false)
   const [createStatus, setCreateStatus] = useState('')
   const [creating, setCreating] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalLines, setTerminalLines] = useState([])
+  const [terminalRunning, setTerminalRunning] = useState(false)
+  const [terminalResult, setTerminalResult] = useState(null)
   const [dragMsg, setDragMsg] = useState(null)
 
   const { data: tags } = useQuery({
@@ -149,7 +156,60 @@ export function ModelfilePage() {
 
   const finalizeModelfile = () => (tab === 'guided' ? built : rawText)
 
-  const runCreate = async () => {
+  const runSshApply = async (navigateAfter) => {
+    const mf = finalizeModelfile()
+    const n = modelName.trim()
+    if (!n) return
+    setCreating(true)
+    setTerminalLines([])
+    setTerminalResult(null)
+    setTerminalOpen(true)
+    setTerminalRunning(true)
+    setCreateStatus('Applying over SSH…')
+    let sawDone = false
+    let sawErr = false
+    try {
+      await consumeModelsSsePost(
+        '/api/models/apply',
+        { name: n, modelfile: mf, overwrite: true },
+        (ev) => {
+          if (ev.type === 'log' && ev.line != null) {
+            setTerminalLines((prev) => [...prev, String(ev.line)])
+          }
+          if (ev.type === 'error') {
+            sawErr = true
+            setTerminalLines((prev) => [...prev, ev.message || 'Error'])
+            setTerminalResult('failed')
+            setCreateStatus(ev.message || 'Failed')
+          }
+          if (ev.type === 'done' && ev.success) {
+            sawDone = true
+            setTerminalResult('success')
+            setCreateStatus('Success')
+            if (navigateAfter) navigate('/models')
+          }
+        },
+        undefined,
+      )
+      if (!sawDone && !sawErr) {
+        setTerminalLines((prev) => [...prev, 'Stream ended without completion'])
+        setTerminalResult('failed')
+        setCreateStatus('Failed')
+      }
+    } catch (e) {
+      const msg = e.message || 'Failed'
+      setTerminalLines((prev) => [...prev, msg])
+      setTerminalResult('failed')
+      setCreateStatus(msg)
+    } finally {
+      setTerminalRunning(false)
+      setCreating(false)
+    }
+  }
+
+  const runCreate = () => runSshApply(true)
+
+  const runUpdateLocal = async () => {
     const mf = finalizeModelfile()
     const n = modelName.trim()
     if (!n) return
@@ -202,10 +262,13 @@ export function ModelfilePage() {
             <ArrowLeft className="h-4 w-4" />
           </Link>
         </Button>
-        <div>
-          <h1 className="text-2xl font-bold">
-            {isCreate ? 'Create Model' : `Edit Model: ${decodedName}`}
-          </h1>
+        <div className="min-w-0 flex-1 space-y-1">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <h1 className="text-2xl font-bold">
+              {isCreate ? 'Create Model' : `Edit Model: ${decodedName}`}
+            </h1>
+            <SshStatusIndicator className="shrink-0" />
+          </div>
           {!isCreate && showLoading && (
             <p className="text-sm text-muted-foreground flex items-center gap-2 mt-1">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -681,17 +744,36 @@ export function ModelfilePage() {
           <Button type="button" variant="outline" onClick={() => setPreviewOpen(true)}>
             Preview Modelfile
           </Button>
-          <div className="flex flex-1 flex-col gap-2 sm:max-w-md sm:flex-row sm:items-center sm:justify-end">
+          <div className="flex flex-1 flex-col gap-2 sm:max-w-lg sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
             <Input
               placeholder="New model name"
               value={modelName}
               onChange={(e) => setModelName(e.target.value)}
               className="font-mono-ui sm:max-w-[220px]"
             />
-            <Button onClick={runCreate} disabled={creating || !modelName.trim()}>
-              {creating && <Loader2 className="h-4 w-4 animate-spin" />}
-              {isCreate ? 'Create Model' : 'Update Model'}
-            </Button>
+            {!isCreate && (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => runSshApply(false)}
+                disabled={creating || !modelName.trim()}
+              >
+                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                Apply to Ollama
+              </Button>
+            )}
+            {!isCreate && (
+              <Button type="button" onClick={runUpdateLocal} disabled={creating || !modelName.trim()}>
+                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                Update Model
+              </Button>
+            )}
+            {isCreate && (
+              <Button type="button" onClick={runCreate} disabled={creating || !modelName.trim()}>
+                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                Create Model
+              </Button>
+            )}
           </div>
         </div>
         {createStatus && (
@@ -700,6 +782,14 @@ export function ModelfilePage() {
           </p>
         )}
       </div>
+
+      <ApplyTerminalPanel
+        open={terminalOpen}
+        onClose={() => setTerminalOpen(false)}
+        lines={terminalLines}
+        running={terminalRunning}
+        result={terminalResult === 'success' ? 'success' : terminalResult === 'failed' ? 'failed' : null}
+      />
     </div>
   )
 }

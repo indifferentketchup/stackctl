@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   ArrowDownAZ,
   CalendarClock,
+  ChevronDown,
   Copy,
   HardDrive,
   Info,
@@ -22,6 +23,14 @@ import {
   showModel,
   unloadAll,
 } from '@/api/ollama.js'
+import { consumeModelsSsePost } from '@/api/models.js'
+import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
+import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Card } from '@/components/ui/card.jsx'
@@ -60,6 +69,22 @@ function formatDate(iso) {
   }
 }
 
+const IM_END = '</think>'
+
+const TEMPLATE_STOPS = {
+  chatml: ['<|im_start|>', IM_END, '<|endoftext|>'],
+  llama3: ['<|eot_id|>', '', ''],
+  mistral: ['[INST]', '[/INST]'],
+}
+
+function suggestModelNameFromHfRef(raw) {
+  let s = (raw || '').trim()
+  if (!s) return ''
+  s = s.replace(/^hf\.co\//i, '')
+  s = s.replace(/[/:]/g, '-').replace(/--+/g, '-').replace(/^-|-$/g, '').toLowerCase()
+  return s.slice(0, 128) || 'model'
+}
+
 export function ModelsPage() {
   const qc = useQueryClient()
   const [sort, setSort] = useState('name')
@@ -70,6 +95,24 @@ export function ModelsPage() {
   const [pullPct, setPullPct] = useState(0)
   const [pulling, setPulling] = useState(false)
   const [pullCtrl, setPullCtrl] = useState(null)
+
+  const [hfOpen, setHfOpen] = useState(false)
+  const [hfRef, setHfRef] = useState('')
+  const [hfName, setHfName] = useState('')
+  const [hfNameTouched, setHfNameTouched] = useState(false)
+  const [hfTemplate, setHfTemplate] = useState('chatml')
+  const [hfParamsOpen, setHfParamsOpen] = useState(false)
+  const [hfTemperature, setHfTemperature] = useState(0.6)
+  const [hfTopP, setHfTopP] = useState(0.95)
+  const [hfTopK, setHfTopK] = useState(20)
+  const [hfRepeatPen, setHfRepeatPen] = useState(1.0)
+  const [hfNumCtx, setHfNumCtx] = useState(8192)
+  const [hfStopsText, setHfStopsText] = useState(() => TEMPLATE_STOPS.chatml.join('\n'))
+
+  const [termOpen, setTermOpen] = useState(false)
+  const [termLines, setTermLines] = useState([])
+  const [termRunning, setTermRunning] = useState(false)
+  const [termResult, setTermResult] = useState(null)
 
   const [infoOpen, setInfoOpen] = useState(false)
   const [infoName, setInfoName] = useState('')
@@ -204,6 +247,72 @@ export function ModelsPage() {
     pullCtrl?.abort()
   }
 
+  const effectiveHfRef = (() => {
+    const r = hfRef.trim()
+    if (!r) return ''
+    return r.toLowerCase().startsWith('hf.co/') ? r : `hf.co/${r.replace(/^\/*/, '')}`
+  })()
+
+  const startPullAndCreate = async () => {
+    const ref = effectiveHfRef
+    const n = hfName.trim()
+    if (!ref || !n) return
+    setTermLines([])
+    setTermResult(null)
+    setTermOpen(true)
+    setTermRunning(true)
+    let sawDone = false
+    let sawErr = false
+    const stops = hfStopsText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    try {
+      await consumeModelsSsePost(
+        '/api/models/pull-and-create',
+        {
+          hf_ref: ref,
+          name: n,
+          template: hfTemplate,
+          parameters: {
+            temperature: hfTemperature,
+            top_p: hfTopP,
+            top_k: hfTopK,
+            repeat_penalty: hfRepeatPen,
+            num_ctx: hfNumCtx,
+            stop: stops,
+          },
+        },
+        (ev) => {
+          if (ev.type === 'log' && ev.line != null) {
+            setTermLines((prev) => [...prev, String(ev.line)])
+          }
+          if (ev.type === 'error') {
+            sawErr = true
+            setTermLines((prev) => [...prev, ev.message || 'Error'])
+            setTermResult('failed')
+          }
+          if (ev.type === 'done' && ev.success) {
+            sawDone = true
+            setTermResult('success')
+            qc.invalidateQueries({ queryKey: ['ollama-models'] })
+          }
+        },
+        undefined,
+      )
+      if (!sawDone && !sawErr) {
+        setTermLines((prev) => [...prev, 'Stream ended without completion'])
+        setTermResult('failed')
+      }
+    } catch (e) {
+      setTermLines((prev) => [...prev, e.message || 'Failed'])
+      setTermResult('failed')
+    } finally {
+      setTermRunning(false)
+      setHfOpen(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1200px] space-y-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -212,6 +321,7 @@ export function ModelsPage() {
           <p className="text-sm text-muted-foreground">
             Pull, inspect, and manage models on your Ollama host.
           </p>
+          <SshStatusIndicator className="mt-3" />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {version?.running && (
@@ -232,6 +342,10 @@ export function ModelsPage() {
           <Button variant="outline" size="sm" onClick={() => setPullOpen(true)}>
             <Download className="h-4 w-4" />
             Pull model
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setHfOpen(true)}>
+            <Download className="h-4 w-4" />
+            Pull from HuggingFace
           </Button>
           <Button size="sm" asChild>
             <Link to="/models/create">
@@ -426,6 +540,158 @@ export function ModelsPage() {
           onClick={() => setPullOpen(false)}
         />
       )}
+
+      <div
+        className={cn(
+          'fixed inset-x-0 bottom-0 z-40 max-h-[90vh] overflow-y-auto border-t border-border bg-card shadow-2xl transition-transform duration-200 md:left-auto md:right-4 md:top-16 md:max-h-[calc(100vh-5rem)] md:w-[480px] md:rounded-lg md:border',
+          hfOpen ? 'translate-y-0' : 'translate-y-full pointer-events-none md:translate-y-0 md:opacity-0 md:pointer-events-none',
+        )}
+      >
+        <div className="space-y-4 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Pull from HuggingFace</h2>
+            <Button variant="ghost" size="sm" onClick={() => setHfOpen(false)}>
+              Close
+            </Button>
+          </div>
+          <div>
+            <Label>HF reference</Label>
+            <Input
+              className="mt-1 font-mono-ui text-sm"
+              placeholder="hf.co/user/repo:Q4_K_M"
+              value={hfRef}
+              onChange={(e) => {
+                const v = e.target.value
+                setHfRef(v)
+                if (!hfNameTouched) setHfName(suggestModelNameFromHfRef(v))
+              }}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Include the quant tag e.g. :Q4_K_M — omitting it pulls the default which may include a vision
+              projector.
+            </p>
+          </div>
+          <div>
+            <Label>Model name</Label>
+            <Input
+              className="mt-1 font-mono-ui text-sm"
+              placeholder="my-model-name"
+              value={hfName}
+              onChange={(e) => {
+                setHfNameTouched(true)
+                setHfName(e.target.value)
+              }}
+            />
+          </div>
+          <div>
+            <Label>Template</Label>
+            <select
+              className="mt-1 flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
+              value={hfTemplate}
+              onChange={(e) => {
+                const t = e.target.value
+                setHfTemplate(t)
+                setHfStopsText((TEMPLATE_STOPS[t] || TEMPLATE_STOPS.chatml).join('\n'))
+              }}
+            >
+              <option value="chatml">ChatML</option>
+              <option value="llama3">Llama3</option>
+              <option value="mistral">Mistral</option>
+            </select>
+          </div>
+
+          <Collapsible open={hfParamsOpen} onOpenChange={setHfParamsOpen}>
+            <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-left text-sm font-semibold hover:bg-accent/10">
+              Parameters
+              <ChevronDown className={cn('h-4 w-4 transition-transform', hfParamsOpen && 'rotate-180')} />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-3 space-y-3 px-1">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <Label className="text-xs">temperature</Label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    className="mt-1"
+                    value={hfTemperature}
+                    onChange={(e) => setHfTemperature(parseFloat(e.target.value) || 0)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">top_p</Label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    className="mt-1"
+                    value={hfTopP}
+                    onChange={(e) => setHfTopP(parseFloat(e.target.value) || 0)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">top_k</Label>
+                  <Input
+                    type="number"
+                    className="mt-1"
+                    value={hfTopK}
+                    onChange={(e) => setHfTopK(parseInt(e.target.value, 10) || 0)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">repeat_penalty</Label>
+                  <Input
+                    type="number"
+                    step="0.05"
+                    className="mt-1"
+                    value={hfRepeatPen}
+                    onChange={(e) => setHfRepeatPen(parseFloat(e.target.value) || 0)}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <Label className="text-xs">num_ctx</Label>
+                  <Input
+                    type="number"
+                    className="mt-1"
+                    value={hfNumCtx}
+                    onChange={(e) => setHfNumCtx(parseInt(e.target.value, 10) || 8192)}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label className="text-xs">Stop tokens (one per line)</Label>
+                <Textarea
+                  className="mt-1 min-h-[100px] font-mono-ui text-xs"
+                  value={hfStopsText}
+                  onChange={(e) => setHfStopsText(e.target.value)}
+                />
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+
+          <Button
+            onClick={startPullAndCreate}
+            disabled={termRunning || !effectiveHfRef || !hfName.trim()}
+          >
+            {termRunning && <Loader2 className="h-4 w-4 animate-spin" />}
+            Pull &amp; Create
+          </Button>
+        </div>
+      </div>
+      {hfOpen && (
+        <button
+          type="button"
+          aria-label="Close HF overlay"
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setHfOpen(false)}
+        />
+      )}
+
+      <ApplyTerminalPanel
+        open={termOpen}
+        onClose={() => setTermOpen(false)}
+        lines={termLines}
+        running={termRunning}
+        result={termResult === 'success' ? 'success' : termResult === 'failed' ? 'failed' : null}
+      />
 
       <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
         <DialogContent className="max-w-2xl">

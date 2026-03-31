@@ -8,6 +8,7 @@ services:
     ports:
       - "100.114.205.53:8700:8700"
     volumes:
+      - /opt/ollamactl/ssh:/opt/ollamactl/ssh:ro
       - /docker/ollamactl:/data
     env_file:
       - .env
