@@ -216,7 +216,7 @@ export function ImportPage() {
   const [hfCreateName, setHfCreateName] = useState('')
 
   const { data: tags } = useQuery({
-    queryKey: ['ollama-models'],
+    queryKey: ['ollama', 'models'],
     queryFn: listModels,
   })
 
@@ -340,7 +340,7 @@ export function ImportPage() {
           if (ev.type === 'done' && ev.success) {
             sawDone = true
             setTerminalResult('success')
-            qc.invalidateQueries({ queryKey: ['ollama-models'] })
+            qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
           }
         },
         undefined
@@ -444,7 +444,7 @@ export function ImportPage() {
           if (ev.type === 'done' && ev.success) {
             sawDone = true
             setTerminalResult('success')
-            qc.invalidateQueries({ queryKey: ['ollama-models'] })
+            qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
           }
         },
         undefined

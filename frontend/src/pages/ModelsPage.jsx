@@ -127,7 +127,7 @@ export function ModelsPage() {
   const [unloadConfirm, setUnloadConfirm] = useState(false)
 
   const { data: tags, isLoading } = useQuery({
-    queryKey: ['ollama-models'],
+    queryKey: ['ollama', 'models'],
     queryFn: async () => {
       const r = await fetch('/api/ollama/models')
       if (!r.ok) throw new Error(await r.text())
@@ -182,7 +182,7 @@ export function ModelsPage() {
 
   const delMut = useMutation({
     mutationFn: (n) => deleteModel(n),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['ollama-models'] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ollama', 'models'] }),
   })
 
   const unloadMut = useMutation({
@@ -193,7 +193,7 @@ export function ModelsPage() {
   const copyMut = useMutation({
     mutationFn: ({ source, destination }) => copyModel(source, destination),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['ollama-models'] })
+      qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
       setCopyRow(null)
       setCopyDest('')
     },
@@ -234,7 +234,7 @@ export function ModelsPage() {
       )
       setPullStatus('Done')
       setPullPct(100)
-      qc.invalidateQueries({ queryKey: ['ollama-models'] })
+      qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
     } catch (e) {
       if (e.name !== 'AbortError') setPullStatus(e.message || 'Pull failed')
     } finally {
@@ -295,7 +295,7 @@ export function ModelsPage() {
           if (ev.type === 'done' && ev.success) {
             sawDone = true
             setTermResult('success')
-            qc.invalidateQueries({ queryKey: ['ollama-models'] })
+            qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
           }
         },
         undefined,

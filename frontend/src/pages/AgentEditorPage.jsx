@@ -65,7 +65,7 @@ export function AgentEditorPage() {
     enabled: !isNew && !!routeId,
   })
 
-  const qModels = useQuery({ queryKey: ['ollama-models'], queryFn: listModels })
+  const qModels = useQuery({ queryKey: ['ollama', 'models'], queryFn: listModels })
   const qPersonas = useQuery({ queryKey: ['personas'], queryFn: listPersonas })
   const qRuns = useQuery({
     queryKey: ['agent-runs', routeId],

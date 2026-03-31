@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -10,7 +10,7 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react'
-import { createModelStream, listModels, showModel } from '@/api/ollama.js'
+import { listModels, showModel } from '@/api/ollama.js'
 import { consumeModelsSsePost } from '@/api/models.js'
 import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
 import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
@@ -61,6 +61,7 @@ function Section({ title, children, defaultOpen = true }) {
 }
 
 export function ModelfilePage() {
+  const qc = useQueryClient()
   const navigate = useNavigate()
   const { name: routeName } = useParams()
   const isCreate = !routeName
@@ -82,7 +83,7 @@ export function ModelfilePage() {
   const [dragMsg, setDragMsg] = useState(null)
 
   const { data: tags } = useQuery({
-    queryKey: ['ollama-models'],
+    queryKey: ['ollama', 'models'],
     queryFn: listModels,
   })
 
@@ -93,7 +94,7 @@ export function ModelfilePage() {
   }, [tags])
 
   const { data: showData, isLoading: showLoading } = useQuery({
-    queryKey: ['ollama-show', decodedName],
+    queryKey: ['ollama', 'show', decodedName],
     queryFn: () => showModel(decodedName),
     enabled: !isCreate && !!decodedName,
   })
@@ -186,6 +187,8 @@ export function ModelfilePage() {
             sawDone = true
             setTerminalResult('success')
             setCreateStatus('Success')
+            qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
+            qc.refetchQueries({ queryKey: ['ollama', 'show', n] })
             if (navigateAfter) navigate('/models')
           }
         },
@@ -208,29 +211,6 @@ export function ModelfilePage() {
   }
 
   const runCreate = () => runSshApply(true)
-
-  const runUpdateLocal = async () => {
-    const mf = finalizeModelfile()
-    const n = modelName.trim()
-    if (!n) return
-    setCreating(true)
-    setCreateStatus('Starting…')
-    try {
-      await createModelStream(n, mf, (ev) => {
-        if (ev.error) {
-          setCreateStatus(ev.error)
-          return
-        }
-        setCreateStatus(ev.status || JSON.stringify(ev).slice(0, 200))
-      })
-      setCreateStatus('Success')
-      navigate('/models')
-    } catch (e) {
-      setCreateStatus(e.message || 'Failed')
-    } finally {
-      setCreating(false)
-    }
-  }
 
   const copyPreview = async () => {
     await navigator.clipboard.writeText(finalizeModelfile())
@@ -760,12 +740,6 @@ export function ModelfilePage() {
               >
                 {creating && <Loader2 className="h-4 w-4 animate-spin" />}
                 Apply to Ollama
-              </Button>
-            )}
-            {!isCreate && (
-              <Button type="button" onClick={runUpdateLocal} disabled={creating || !modelName.trim()}>
-                {creating && <Loader2 className="h-4 w-4 animate-spin" />}
-                Update Model
               </Button>
             )}
             {isCreate && (
