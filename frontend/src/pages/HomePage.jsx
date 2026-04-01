@@ -45,7 +45,6 @@ const cards = [
     description: 'GGUF, Safetensors, and HuggingFace import.',
     icon: Upload,
     phase: 'Phase 4',
-    disabled: true,
   },
   {
     to: '/personas',
@@ -53,7 +52,6 @@ const cards = [
     description: 'Sync personas with boolab.',
     icon: Users,
     phase: 'Phase 3',
-    disabled: true,
   },
   {
     to: '/gpu',
@@ -61,7 +59,6 @@ const cards = [
     description: 'NSSM env and GPU tuning.',
     icon: Monitor,
     phase: 'Phase 5',
-    disabled: true,
   },
   {
     to: '/rag',
@@ -77,7 +74,6 @@ const cards = [
     description: 'Tool-using agents and tests.',
     icon: Bot,
     phase: 'Phase 7',
-    disabled: true,
   },
   {
     to: '/flows',
@@ -85,7 +81,6 @@ const cards = [
     description: 'Visual flow builder.',
     icon: GitBranch,
     phase: 'Phase 8',
-    disabled: true,
   },
 ]
 
