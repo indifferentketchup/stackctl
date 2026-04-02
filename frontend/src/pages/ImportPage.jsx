@@ -200,6 +200,7 @@ export function ImportPage() {
   const [terminalLines, setTerminalLines] = useState([])
   const [terminalRunning, setTerminalRunning] = useState(false)
   const [terminalResult, setTerminalResult] = useState(null)
+  const [pullProgress, setPullProgress] = useState(null)
 
   const [ggufVerify, setGgufVerify] = useState(null)
   const [safeVerify, setSafeVerify] = useState(null)
@@ -412,6 +413,7 @@ export function ImportPage() {
     setCreating(true)
     setTerminalLines([])
     setTerminalResult(null)
+    setPullProgress(null)
     setTerminalOpen(true)
     setTerminalRunning(true)
     let sawDone = false
@@ -433,16 +435,23 @@ export function ImportPage() {
           },
         },
         (ev) => {
+          if (ev.type === 'progress') {
+            const t = ev.total ? Math.round((ev.completed / ev.total) * 100) : 0
+            setPullProgress({ status: String(ev.status ?? ''), pct: t })
+            return
+          }
           if (ev.type === 'log' && ev.line != null) {
             setTerminalLines((prev) => [...prev, String(ev.line)])
           }
           if (ev.type === 'error') {
             sawErr = true
+            setPullProgress(null)
             setTerminalLines((prev) => [...prev, ev.message || 'Error'])
             setTerminalResult('failed')
           }
           if (ev.type === 'done' && ev.success) {
             sawDone = true
+            setPullProgress(null)
             setTerminalResult('success')
             qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
           }
@@ -458,6 +467,7 @@ export function ImportPage() {
       setTerminalLines((prev) => [...prev, e.message || 'Pull & create failed'])
       setTerminalResult('failed')
     } finally {
+      setPullProgress(null)
       setTerminalRunning(false)
       setCreating(false)
     }
@@ -911,10 +921,12 @@ export function ImportPage() {
           setTerminalOpen(false)
           setTerminalLines([])
           setTerminalResult(null)
+          setPullProgress(null)
         }}
         lines={terminalLines}
         running={terminalRunning}
         result={terminalResult}
+        pullProgress={pullProgress}
       />
     </div>
   )

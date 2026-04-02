@@ -315,8 +315,17 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
         if chunk.get("error"):
             yield _sse(json.dumps({"type": "error", "message": chunk["error"]}))
             return
-        line = chunk.get("status") or json.dumps(chunk, ensure_ascii=False)[:500]
-        yield _sse(json.dumps({"type": "log", "line": f"[pull] {line}"}))
+        status = chunk.get("status", "")
+        total = chunk.get("total", 0) or 0
+        completed = chunk.get("completed", 0) or 0
+        if total:
+            yield _sse(
+                json.dumps(
+                    {"type": "progress", "status": status, "total": int(total), "completed": int(completed)}
+                )
+            )
+        elif status:
+            yield _sse(json.dumps({"type": "log", "line": f"[pull] {status}"}))
         if chunk.get("status") == "success":
             pull_ok = True
             yield _sse(json.dumps({"type": "log", "line": "[pull] completed"}))

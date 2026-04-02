@@ -17,12 +17,12 @@ function toneForLine(text) {
   return 'normal'
 }
 
-export function ApplyTerminalPanel({ open, onClose, lines, running, result }) {
+export function ApplyTerminalPanel({ open, onClose, lines, running, result, pullProgress }) {
   const bottomRef = useRef(null)
 
   useEffect(() => {
     if (open) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [open, lines, running])
+  }, [open, lines, running, pullProgress])
 
   if (!open) return null
 
@@ -71,6 +71,20 @@ export function ApplyTerminalPanel({ open, onClose, lines, running, result }) {
               </div>
             )
           })}
+          {pullProgress && (
+            <div className="mt-2 space-y-1">
+              <div className="flex justify-between text-xs text-white/50">
+                <span>{pullProgress.status}</span>
+                <span>{pullProgress.pct}%</span>
+              </div>
+              <div className="h-1.5 w-full rounded-full bg-white/10">
+                <div
+                  className="h-1.5 rounded-full bg-purple-500 transition-all duration-200"
+                  style={{ width: `${pullProgress.pct}%` }}
+                />
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
         </div>
         <div className="shrink-0 border-t border-white/10 px-3 py-2 text-xs">
