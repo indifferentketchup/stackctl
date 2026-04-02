@@ -71,6 +71,22 @@ function looksLikeMmproj(pathOrName) {
   return b.includes('mmproj') || b.includes('vision')
 }
 
+/** HF file picker: hide mmproj / vision projector blobs from selectable rows. */
+function hfFileRowExcludedFromPicker(filePath) {
+  const base = pathBasename(filePath)
+  if (!base) return false
+  if (base.toLowerCase() === 'mmproj.gguf') return true
+  return /mmproj/i.test(base)
+}
+
+function sanitizeHfAutoModelName(raw) {
+  let s = String(raw || '').toLowerCase().replace(/\./g, '')
+  s = s.replace(/[\s_]+/g, '-')
+  s = s.replace(/-+/g, '-')
+  s = s.replace(/^-+|-+$/g, '')
+  return s
+}
+
 function pathLooksAlreadyQuantized(p) {
   const b = pathBasename(p)
   if (!b) return false
@@ -388,6 +404,12 @@ export function ImportPage() {
     return r
   }, [hfRepoInput])
 
+  const hfVisibleGgufFiles = useMemo(() => {
+    const list = hfData?.files
+    if (!Array.isArray(list)) return []
+    return list.filter((f) => !hfFileRowExcludedFromPicker(f.name))
+  }, [hfData])
+
   const selectHfFile = (fileName) => {
     setHfSelectedFile(fileName)
     const stem = fileName.replace(/\.gguf$/i, '')
@@ -395,7 +417,8 @@ export function ImportPage() {
     setHfCreateName((prev) => {
       if (prev.trim()) return prev
       const leaf = fileName.split('/').pop() || fileName
-      const s = leaf.replace(/\.gguf$/i, '').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 64)
+      const stem = leaf.replace(/\.gguf$/i, '')
+      const s = sanitizeHfAutoModelName(stem).slice(0, 64)
       return s || 'imported-model'
     })
   }
@@ -842,7 +865,7 @@ export function ImportPage() {
                   </div>
                 </dl>
               </div>
-              {hfData.files?.length ? (
+              {hfVisibleGgufFiles.length ? (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead>
@@ -854,7 +877,7 @@ export function ImportPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {hfData.files.map((f) => {
+                      {hfVisibleGgufFiles.map((f) => {
                         const q = parseQuantFromGgufFilename(f.name)
                         return (
                           <tr key={f.name} className="border-b border-border/60">
