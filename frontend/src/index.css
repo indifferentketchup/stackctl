@@ -42,4 +42,29 @@
   .font-mono-ui {
     font-family: 'Share Tech Mono', ui-monospace, monospace;
   }
+
+  pre,
+  code {
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-width: 100%;
+    overflow-wrap: break-word;
+  }
+
+  .message-content,
+  .chat-message {
+    overflow-x: hidden;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  @media (max-width: 600px) {
+    pre,
+    code {
+      font-size: 0.85rem;
+      max-height: 300px;
+      overflow: auto;
+    }
+  }
 }

@@ -378,33 +378,40 @@ export function AgentEditorPage() {
             </div>
             <p className="text-muted-foreground">Model: {model || '—'}</p>
           </div>
-          <div className="rounded-md border border-border bg-card/40 min-h-[200px] max-h-[360px] overflow-y-auto p-3 text-sm space-y-2">
+          <div className="message-content rounded-md border border-border bg-card/40 min-h-[200px] max-h-[360px] overflow-y-auto overflow-x-hidden p-3 text-sm space-y-2 w-full max-w-full">
             {chatLog.map((m, i) => (
-              <div key={i} className={cn(m.role === 'user' && 'text-sky-300', m.role === 'error' && 'text-red-400')}>
+              <div
+                key={i}
+                className={cn(
+                  'chat-message',
+                  m.role === 'user' && 'text-sky-300',
+                  m.role === 'error' && 'text-red-400'
+                )}
+              >
                 {m.role === 'tool_call' && (
-                  <div className="rounded border border-border/60 p-2 text-xs">
+                  <div className="rounded border border-border/60 p-2 text-xs min-w-0">
                     <div className="font-semibold">Tool: {m.tool}</div>
-                    <pre className="mt-1 whitespace-pre-wrap opacity-90">{JSON.stringify(m.args, null, 2)}</pre>
+                    <pre className="mt-1 min-w-0 whitespace-pre-wrap opacity-90">{JSON.stringify(m.args, null, 2)}</pre>
                   </div>
                 )}
                 {m.role === 'tool_result' && (
-                  <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs">
+                  <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-xs min-w-0">
                     <div className="font-semibold text-emerald-300">Result · {m.tool}</div>
-                    <pre className="mt-1 whitespace-pre-wrap">{String(m.text).slice(0, 2000)}</pre>
+                    <pre className="mt-1 min-w-0 whitespace-pre-wrap">{String(m.text).slice(0, 2000)}</pre>
                   </div>
                 )}
                 {(m.role === 'user' || m.role === 'assistant' || m.role === 'error') && (
-                  <div>
+                  <div className="min-w-0">
                     <span className="text-[10px] uppercase text-muted-foreground">{m.role}</span>
-                    <p className="whitespace-pre-wrap">{m.text}</p>
+                    <p className="whitespace-pre-wrap break-words">{m.text}</p>
                   </div>
                 )}
               </div>
             ))}
             {streamText && (
-              <div>
+              <div className="chat-message min-w-0">
                 <span className="text-[10px] uppercase text-muted-foreground">assistant</span>
-                <p className="whitespace-pre-wrap">{streamText}</p>
+                <p className="whitespace-pre-wrap break-words">{streamText}</p>
               </div>
             )}
           </div>
