@@ -299,37 +299,62 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
     yield _sse(json.dumps({"type": "log", "line": f"[pull] starting {hf}"}))
 
     pull_ok = False
-    async for raw in _stream_ollama_pull(hf):
-        payload = raw.decode("utf-8", errors="replace").strip()
-        if not payload.startswith("data: "):
-            continue
-        inner = payload[6:].strip()
-        if inner == "[DONE]":
-            pull_ok = True
-            yield _sse(json.dumps({"type": "log", "line": "[pull] completed"}))
-            break
+    q: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _pull_to_queue() -> None:
         try:
-            chunk = json.loads(inner)
-        except json.JSONDecodeError:
-            continue
-        if chunk.get("error"):
-            yield _sse(json.dumps({"type": "error", "message": chunk["error"]}))
-            return
-        status = chunk.get("status", "")
-        total = chunk.get("total", 0) or 0
-        completed = chunk.get("completed", 0) or 0
-        if total:
-            yield _sse(
-                json.dumps(
-                    {"type": "progress", "status": status, "total": int(total), "completed": int(completed)}
+            async for raw in _stream_ollama_pull(hf):
+                await q.put(raw)
+        finally:
+            await q.put(None)
+
+    task = asyncio.create_task(_pull_to_queue())
+    try:
+        while True:
+            try:
+                raw = await asyncio.wait_for(q.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n".encode()
+                continue
+            if raw is None:
+                break
+            payload = raw.decode("utf-8", errors="replace").strip()
+            if not payload.startswith("data: "):
+                continue
+            inner = payload[6:].strip()
+            if inner == "[DONE]":
+                pull_ok = True
+                yield _sse(json.dumps({"type": "log", "line": "[pull] completed"}))
+                break
+            try:
+                chunk = json.loads(inner)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("error"):
+                yield _sse(json.dumps({"type": "error", "message": chunk["error"]}))
+                return
+            status = chunk.get("status", "")
+            total = chunk.get("total", 0) or 0
+            completed = chunk.get("completed", 0) or 0
+            if total:
+                yield _sse(
+                    json.dumps(
+                        {"type": "progress", "status": status, "total": int(total), "completed": int(completed)}
+                    )
                 )
-            )
-        elif status:
-            yield _sse(json.dumps({"type": "log", "line": f"[pull] {status}"}))
-        if chunk.get("status") == "success":
-            pull_ok = True
-            yield _sse(json.dumps({"type": "log", "line": "[pull] completed"}))
-            break
+            elif status:
+                yield _sse(json.dumps({"type": "log", "line": f"[pull] {status}"}))
+            if chunk.get("status") == "success":
+                pull_ok = True
+                yield _sse(json.dumps({"type": "log", "line": "[pull] completed"}))
+                break
+    finally:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if not pull_ok:
         yield _sse(json.dumps({"type": "error", "message": "Pull did not complete successfully"}))
