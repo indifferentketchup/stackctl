@@ -56,17 +56,19 @@ def nssm_cmd_service_action(action: str) -> str:
     )
 
 
-async def connect_sam_desktop() -> asyncssh.SSHClientConnection:
-    host = sam_desktop_host()
-    user = sam_desktop_user()
+async def connect_ssh(host: str, user: str) -> asyncssh.SSHClientConnection:
+    h = (host or "").strip()
+    u = (user or "").strip()
+    if not h or not u:
+        raise OSError("SSH host and user are required")
     key_path = sam_desktop_key_path()
     if not os.path.isfile(key_path):
         raise OSError("SSH key is not available")
     try:
         conn = await asyncio.wait_for(
             asyncssh.connect(
-                host,
-                username=user,
+                h,
+                username=u,
                 client_keys=[key_path],
                 known_hosts=None,
             ),
@@ -75,6 +77,20 @@ async def connect_sam_desktop() -> asyncssh.SSHClientConnection:
     except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
         raise OSError("Could not connect over SSH") from e
     return conn
+
+
+async def connect_sam_desktop() -> asyncssh.SSHClientConnection:
+    return await connect_ssh(sam_desktop_host(), sam_desktop_user())
+
+
+async def remote_temp_linux_path(conn: asyncssh.SSHClientConnection, prefix: str) -> str:
+    """Linux/Bash remote temp file path (e.g. systemd Ollama hosts)."""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in prefix)[:48] or "mf"
+    r = await conn.run(f"mktemp -t ollamactl_{safe}_XXXXXX.txt", check=True, encoding="utf-8")
+    out = (r.stdout or "").strip().splitlines()
+    if not out:
+        raise RuntimeError("Could not create temp path over SSH")
+    return out[-1].strip()
 
 
 async def remote_temp_modelfile_path(conn: asyncssh.SSHClientConnection, fname: str) -> str:

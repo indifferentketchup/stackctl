@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,10 +15,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_deps import require_admin
+from machine_queries import all_assignments_map, assignment_for_model, list_machines as db_list_machines, machine_row
 from sam_ssh import (
     connect_sam_desktop,
+    connect_ssh,
     iter_ssh_cmd_lines,
     powershell_single_quote,
+    remote_temp_linux_path,
     remote_temp_modelfile_path,
     ssh_remove_file,
     ssh_write_file,
@@ -28,6 +32,16 @@ router = APIRouter()
 
 def _ollama_base() -> str:
     return os.environ.get("OLLAMA_URL", "http://100.101.41.16:11434").rstrip("/")
+
+
+async def _assigned_ollama_base(model_name: str) -> str:
+    a = await assignment_for_model(model_name)
+    if not a:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model_name}' is not assigned to any machine in ollamactl",
+        )
+    return str(a["ollama_url"]).rstrip("/")
 
 
 def _sse(data: str) -> bytes:
@@ -62,35 +76,133 @@ class CopyBody(BaseModel):
 
 
 @router.get("/models")
-async def list_models():
-    base = _ollama_base()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            r = await client.get(f"{base}/api/tags")
-            r.raise_for_status()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Ollama unreachable: {e}") from e
-    return r.json()
+async def list_models(machine_id: int | None = Query(None)):
+    assign_map = await all_assignments_map()
+
+    async def _annotate(models: list, src_mid: int, src_mname: str) -> list[dict]:
+        out: list[dict] = []
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            name = (m.get("name") or m.get("model") or "").strip()
+            aid, aname = assign_map.get(name, (None, None))
+            out.append(
+                {
+                    **m,
+                    "machine_id": aid,
+                    "machine_name": aname,
+                    "source_machine_id": src_mid,
+                    "source_machine_name": src_mname,
+                }
+            )
+        return out
+
+    if machine_id is not None:
+        mrow = await machine_row(machine_id)
+        if not mrow:
+            raise HTTPException(status_code=404, detail="Machine not found")
+        base = str(mrow["ollama_url"]).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                r = await client.get(f"{base}/api/tags")
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Ollama unreachable: {e}") from e
+        data = r.json()
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return {"models": []}
+        return {"models": await _annotate(models, machine_id, str(mrow["name"]))}
+
+    allm = await db_list_machines()
+
+    async def _fetch_tags(minfo: dict) -> list[dict]:
+        mid = int(minfo["id"])
+        mname = str(minfo["name"])
+        base = str(minfo["ollama_url"]).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                r = await client.get(f"{base}/api/tags")
+                r.raise_for_status()
+                data = r.json()
+        except Exception:
+            return []
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return []
+        return await _annotate(models, mid, mname)
+
+    results = await asyncio.gather(*[_fetch_tags(m) for m in allm], return_exceptions=True)
+    merged: list[dict] = []
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        merged.extend(res)
+    return {"models": merged}
 
 
 @router.get("/running", dependencies=[Depends(require_admin)])
-async def running_models():
-    base = _ollama_base()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            r = await client.get(f"{base}/api/ps")
-            r.raise_for_status()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Ollama unreachable: {e}") from e
-    return r.json()
+async def running_models(machine_id: int | None = Query(None)):
+    if machine_id is not None:
+        mrow = await machine_row(machine_id)
+        if not mrow:
+            raise HTTPException(status_code=404, detail="Machine not found")
+        base = str(mrow["ollama_url"]).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                r = await client.get(f"{base}/api/ps")
+                r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Ollama unreachable: {e}") from e
+        data = r.json()
+        if not isinstance(data, dict):
+            return {"models": []}
+        models = data.get("models")
+        if not isinstance(models, list):
+            return {"models": []}
+        out: list[dict] = []
+        for item in models:
+            if isinstance(item, dict):
+                out.append({**item, "source_machine_id": machine_id, "source_machine_name": str(mrow["name"])})
+        return {"models": out}
+
+    allm = await db_list_machines()
+
+    async def _fetch_ps(minfo: dict) -> list[dict]:
+        mid = int(minfo["id"])
+        mname = str(minfo["name"])
+        base = str(minfo["ollama_url"]).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                r = await client.get(f"{base}/api/ps")
+                r.raise_for_status()
+                data = r.json()
+        except Exception:
+            return []
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return []
+        out: list[dict] = []
+        for item in models:
+            if isinstance(item, dict):
+                out.append({**item, "source_machine_id": mid, "source_machine_name": mname})
+        return out
+
+    results = await asyncio.gather(*[_fetch_ps(m) for m in allm], return_exceptions=True)
+    merged: list[dict] = []
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        merged.extend(res)
+    return {"models": merged}
 
 
 @router.post("/unload/{model_name:path}", dependencies=[Depends(require_admin)])
 async def unload_model(model_name: str):
     if not model_name.strip():
         raise HTTPException(status_code=400, detail="model name is required")
-    base = _ollama_base()
     name = model_name.strip()
+    base = await _assigned_ollama_base(name)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
             r = await client.post(
@@ -107,7 +219,7 @@ async def unload_model(model_name: str):
 
 @router.get("/show", dependencies=[Depends(require_admin)])
 async def show_model(name: str = Query(..., min_length=1)):
-    base = _ollama_base()
+    base = await _assigned_ollama_base(name.strip())
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             r = await client.post(f"{base}/api/show", json={"name": name.strip()})
@@ -170,8 +282,8 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(int(p) for p in parts) if parts else (0,)
 
 
-async def _stream_ollama_pull(model: str) -> AsyncIterator[bytes]:
-    base = _ollama_base()
+async def _stream_ollama_pull(model: str, *, base_override: str | None = None) -> AsyncIterator[bytes]:
+    base = (base_override or _ollama_base()).rstrip("/")
     payload = {"model": model, "stream": True}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None)) as client:
@@ -197,9 +309,9 @@ async def _stream_ollama_pull(model: str) -> AsyncIterator[bytes]:
 
 
 async def _stream_ollama_create(
-    name: str, modelfile: str, quantize: str | None = None
+    name: str, modelfile: str, quantize: str | None = None, *, base_override: str | None = None
 ) -> AsyncIterator[bytes]:
-    base = _ollama_base()
+    base = (base_override or _ollama_base()).rstrip("/")
     payload: dict = {"name": name, "modelfile": modelfile, "stream": True}
     if quantize:
         payload["quantize"] = quantize
@@ -339,26 +451,50 @@ async def _ssh_create_quantized_sse(body: CreateQuantizedBody) -> AsyncIterator[
         )
         return
 
+    assign = await assignment_for_model(name)
+    if not assign:
+        yield _sse(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"Model '{name}' is not assigned to any machine in ollamactl",
+                }
+            )
+        )
+        return
+    host = (assign.get("ssh_host") or "").strip()
+    user = (assign.get("ssh_user") or "").strip()
+    ssh_type = (str(assign.get("ssh_type") or "nssm")).strip().lower()
+    if not host or not user:
+        yield _sse(json.dumps({"type": "error", "message": "Machine has no SSH host/user configured"}))
+        return
+
     fname = f"ollamactl_quant_{uuid.uuid4().hex}.txt"
     conn = None
     remote_path = ""
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await connect_ssh(host, user)
         except OSError as e:
             yield _sse(json.dumps({"type": "error", "message": str(e)}))
             return
 
-        remote_path = await remote_temp_modelfile_path(conn, fname)
+        if ssh_type == "systemd":
+            remote_path = await remote_temp_linux_path(conn, "quant")
+        else:
+            remote_path = await remote_temp_modelfile_path(conn, fname)
         await ssh_write_file(conn, remote_path, mf)
 
         if raw_q:
             create_inner = f"ollama create {name} --quantize {raw_q} -f {remote_path}"
         else:
             create_inner = f"ollama create {name} -f {remote_path}"
-        create_ps = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
+        if ssh_type == "systemd":
+            cmd = create_inner
+        else:
+            cmd = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
         exit_c: int | None = None
-        async for text, code in iter_ssh_cmd_lines(conn, create_ps):
+        async for text, code in iter_ssh_cmd_lines(conn, cmd):
             if text == "__end__":
                 exit_c = code
                 break
@@ -477,7 +613,7 @@ async def copy_model(body: CopyBody):
     dst = (body.destination or "").strip()
     if not src or not dst:
         raise HTTPException(status_code=400, detail="source and destination are required")
-    base = _ollama_base()
+    base = await _assigned_ollama_base(src)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
             r = await client.post(
@@ -496,13 +632,14 @@ async def copy_model(body: CopyBody):
 async def delete_ollama_model(model_name: str, _owner: dict = Depends(require_admin)):
     if not model_name.strip():
         raise HTTPException(status_code=400, detail="model name is required")
-    base = _ollama_base()
+    name = model_name.strip()
+    base = await _assigned_ollama_base(name)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             r = await client.request(
                 "DELETE",
                 f"{base}/api/delete",
-                json={"name": model_name},
+                json={"name": name},
             )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Ollama unreachable: {e}") from e
@@ -516,43 +653,44 @@ async def delete_ollama_model(model_name: str, _owner: dict = Depends(require_ad
 
 @router.post("/unload-all")
 async def unload_all_models(_owner: dict = Depends(require_admin)):
-    base = _ollama_base()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            r = await client.get(f"{base}/api/ps")
-            r.raise_for_status()
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="Ollama unreachable") from None
-    try:
-        data = r.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Ollama unreachable") from None
-
-    models = data.get("models")
-    if not isinstance(models, list) or len(models) == 0:
-        return {"unloaded": []}
-
-    names: list[str] = []
-    for item in models:
-        if not isinstance(item, dict):
-            continue
-        raw = item.get("name") or item.get("model")
-        if isinstance(raw, str) and raw.strip():
-            names.append(raw.strip())
-
-    if not names:
-        return {"unloaded": []}
-
+    allm = await db_list_machines()
     unloaded: list[str] = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        for name in names:
-            try:
-                await client.post(
-                    f"{base}/api/generate",
-                    json={"model": name, "prompt": "", "keep_alive": 0, "stream": False},
-                )
-            except httpx.HTTPError:
-                pass
-            unloaded.append(name)
 
+    async def _unload_one(minfo: dict) -> list[str]:
+        base = str(minfo["ollama_url"]).rstrip("/")
+        local: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                r = await client.get(f"{base}/api/ps")
+                r.raise_for_status()
+                data = r.json()
+        except Exception:
+            return local
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return local
+        names: list[str] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("name") or item.get("model")
+            if isinstance(raw, str) and raw.strip():
+                names.append(raw.strip())
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            for name in names:
+                try:
+                    await client.post(
+                        f"{base}/api/generate",
+                        json={"model": name, "prompt": "", "keep_alive": 0, "stream": False},
+                    )
+                except httpx.HTTPError:
+                    pass
+                local.append(name)
+        return local
+
+    results = await asyncio.gather(*[_unload_one(m) for m in allm], return_exceptions=True)
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        unloaded.extend(res)
     return {"unloaded": unloaded}

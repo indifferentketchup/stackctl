@@ -1,11 +1,13 @@
 import { apiFetch, getAuthHeaders } from './client.js'
 
-export function listModels() {
-  return apiFetch('/api/ollama/models')
+export function listModels(machineId) {
+  const q = machineId != null && machineId !== '' ? `?machine_id=${encodeURIComponent(machineId)}` : ''
+  return apiFetch(`/api/ollama/models${q}`)
 }
 
-export function getRunning() {
-  return apiFetch('/api/ollama/running')
+export function getRunning(machineId) {
+  const q = machineId != null && machineId !== '' ? `?machine_id=${encodeURIComponent(machineId)}` : ''
+  return apiFetch(`/api/ollama/running${q}`)
 }
 
 export function getVersion() {

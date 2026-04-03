@@ -12,6 +12,7 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(_REPO_ROOT, "ollamactl.db"))
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS gpu_config (
@@ -96,4 +97,82 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS machines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                ollama_url TEXT NOT NULL,
+                ssh_host TEXT,
+                ssh_user TEXT,
+                ssh_type TEXT NOT NULL DEFAULT 'nssm',
+                gpu_label TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS model_assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL UNIQUE,
+                machine_id INTEGER NOT NULL REFERENCES machines(id),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
         await db.commit()
+
+    await _seed_machines_and_assignments()
+
+
+async def _seed_machines_and_assignments() -> None:
+    gpu_host = (os.environ.get("GPU_HOST") or "100.65.131.75").strip()
+    gpu_user = (os.environ.get("GPU_USER") or "samkintop").strip()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        async with db.execute("SELECT COUNT(*) FROM machines") as cur:
+            row = await cur.fetchone()
+            n_m = int(row[0] if row else 0)
+        if n_m == 0:
+            await db.execute(
+                """
+                INSERT INTO machines (name, ollama_url, ssh_host, ssh_user, ssh_type, gpu_label, is_default)
+                VALUES
+                  ('sam-desktop', 'http://100.101.41.16:11434', '100.101.41.16', 'samki', 'nssm', 'RTX 5090 32GB', 0),
+                  ('gpu', 'http://100.65.131.75:11434', ?, ?, 'systemd', 'RTX 4080 Super 16GB', 0)
+                """,
+                (gpu_host, gpu_user),
+            )
+            await db.commit()
+
+        async with db.execute("SELECT COUNT(*) FROM model_assignments") as cur:
+            row2 = await cur.fetchone()
+            n_a = int(row2[0] if row2 else 0)
+        if n_a == 0:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, name FROM machines WHERE name IN ('sam-desktop', 'gpu')"
+            ) as cur:
+                rows = await cur.fetchall()
+            by_name = {str(r["name"]): int(r["id"]) for r in rows}
+            mid_gpu = by_name.get("gpu")
+            mid_sd = by_name.get("sam-desktop")
+            if mid_gpu is not None and mid_sd is not None:
+                pairs = [
+                    ("qwen3.5:9b", mid_gpu),
+                    ("qwen3-embedding:latest", mid_gpu),
+                    ("qwen3.5:27b", mid_sd),
+                    ("qwen3-coder:30b", mid_sd),
+                ]
+                for model_name, mid in pairs:
+                    await db.execute(
+                        """
+                        INSERT INTO model_assignments (model_name, machine_id, created_at, updated_at)
+                        VALUES (?, ?, datetime('now'), datetime('now'))
+                        """,
+                        (model_name, mid),
+                    )
+                await db.commit()

@@ -19,10 +19,12 @@ import {
   copyModel,
   deleteModel,
   getVersion,
+  listModels,
   pullModelStream,
   showModel,
   unloadAll,
 } from '@/api/ollama.js'
+import { listMachines, upsertAssignment } from '@/api/machines.js'
 import { consumeModelsSsePost } from '@/api/models.js'
 import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
 import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
@@ -47,6 +49,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Progress } from '@/components/ui/progress.jsx'
 import { Textarea } from '@/components/ui/textarea.jsx'
 import { cn } from '@/lib/utils.js'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 
 function formatBytes(n) {
   if (n == null || Number.isNaN(Number(n))) return '—'
@@ -85,9 +88,27 @@ function suggestModelNameFromHfRef(raw) {
   return s.slice(0, 128) || 'model'
 }
 
+const MACHINE_BADGE_PALETTE = [
+  'border-sky-500/50 bg-sky-950/40 text-sky-100',
+  'border-violet-500/50 bg-violet-950/40 text-violet-100',
+  'border-amber-500/50 bg-amber-950/40 text-amber-100',
+  'border-emerald-500/50 bg-emerald-950/40 text-emerald-100',
+  'border-rose-500/50 bg-rose-950/40 text-rose-100',
+]
+
+function badgeClassForMachine(name) {
+  if (!name) return 'border-muted-foreground/40 bg-muted/30 text-muted-foreground'
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+  return MACHINE_BADGE_PALETTE[h % MACHINE_BADGE_PALETTE.length]
+}
+
 export function ModelsPage() {
   const qc = useQueryClient()
   const [sort, setSort] = useState('name')
+  const [machineTab, setMachineTab] = useState('all')
+  const [reassignRow, setReassignRow] = useState(null)
+  const [reassignMachineId, setReassignMachineId] = useState('')
   const [pullOpen, setPullOpen] = useState(false)
   const [pullName, setPullName] = useState('')
   const [hfMode, setHfMode] = useState(false)
@@ -126,12 +147,24 @@ export function ModelsPage() {
 
   const [unloadConfirm, setUnloadConfirm] = useState(false)
 
+  const { data: machineList } = useQuery({
+    queryKey: ['machines'],
+    queryFn: listMachines,
+  })
+
   const { data: tags, isLoading } = useQuery({
     queryKey: ['ollama', 'models'],
-    queryFn: async () => {
-      const r = await fetch('/api/ollama/models')
-      if (!r.ok) throw new Error(await r.text())
-      return r.json()
+    queryFn: () => listModels(),
+  })
+
+  const assignMut = useMutation({
+    mutationFn: ({ model_name, machine_id }) => upsertAssignment(model_name, machine_id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
+      qc.invalidateQueries({ queryKey: ['machines'] })
+      qc.invalidateQueries({ queryKey: ['machine-assignments'] })
+      setReassignRow(null)
+      setReassignMachineId('')
     },
   })
 
@@ -152,10 +185,18 @@ export function ModelsPage() {
         paramSize: d.parameter_size || d.parent_model || '—',
         quant: d.quantization_level || '—',
         modified: m.modified_at,
+        machineId: m.machine_id ?? null,
+        machineName: m.machine_name ?? null,
+        sourceMachineId: m.source_machine_id ?? null,
+        sourceMachineName: m.source_machine_name ?? null,
         raw: m,
       }
     })
-    const sorted = [...mapped].sort((a, b) => {
+    const filtered =
+      machineTab === 'all'
+        ? mapped
+        : mapped.filter((row) => String(row.sourceMachineId ?? '') === machineTab)
+    const sorted = [...filtered].sort((a, b) => {
       if (sort === 'name') return a.name.localeCompare(b.name)
       if (sort === 'size') return (b.size || 0) - (a.size || 0)
       if (sort === 'modified') {
@@ -166,7 +207,9 @@ export function ModelsPage() {
       return 0
     })
     return sorted
-  }, [tags, sort])
+  }, [tags, sort, machineTab])
+
+  const machines = machineList?.machines ?? []
 
   const openInfo = async (name) => {
     setInfoName(name)
@@ -356,7 +399,23 @@ export function ModelsPage() {
         </div>
       </header>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="space-y-3">
+        <div>
+          <span className="text-xs text-muted-foreground mr-2">Machine:</span>
+          <Tabs value={machineTab} onValueChange={setMachineTab} className="inline-block">
+            <TabsList className="flex-wrap h-auto min-h-10">
+              <TabsTrigger value="all" className="text-xs">
+                All machines
+              </TabsTrigger>
+              {machines.map((m) => (
+                <TabsTrigger key={m.id} value={String(m.id)} className="text-xs">
+                  {m.name}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        </div>
+        <div className="flex flex-wrap gap-2">
         <span className="text-xs text-muted-foreground self-center mr-2">Sort:</span>
         <Button
           variant={sort === 'name' ? 'secondary' : 'outline'}
@@ -382,13 +441,15 @@ export function ModelsPage() {
           <CalendarClock className="h-4 w-4" />
           Modified
         </Button>
+        </div>
       </div>
 
       <Card className="overflow-x-auto p-0">
-        <table className="w-full min-w-[720px] text-left text-sm">
+        <table className="w-full min-w-[800px] text-left text-sm">
           <thead>
             <tr className="border-b border-border bg-card/80 text-muted-foreground">
               <th className="p-3 font-semibold">Name</th>
+              <th className="p-3 font-semibold w-[140px]">Route</th>
               <th className="p-3 font-semibold">Size</th>
               <th className="p-3 font-semibold">Param size</th>
               <th className="p-3 font-semibold">Quantization</th>
@@ -399,22 +460,42 @@ export function ModelsPage() {
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                <td colSpan={7} className="p-8 text-center text-muted-foreground">
                   <Loader2 className="inline h-5 w-5 animate-spin" /> Loading…
                 </td>
               </tr>
             )}
             {!isLoading && models.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                <td colSpan={7} className="p-8 text-center text-muted-foreground">
                   No models found. Pull or create one to get started.
                 </td>
               </tr>
             )}
             {models.map((row) => (
-              <tr key={row.name} className="border-b border-border/80 hover:bg-accent/10">
+              <tr key={`${row.name}-${row.sourceMachineId ?? 'x'}`} className="border-b border-border/80 hover:bg-accent/10">
                 <td className="p-3 font-mono-ui text-xs sm:text-sm break-all max-w-[200px]">
                   {row.name}
+                </td>
+                <td className="p-3 align-top">
+                  <button
+                    type="button"
+                    className={cn(
+                      'inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors hover:opacity-90',
+                      row.machineName
+                        ? badgeClassForMachine(row.machineName)
+                        : 'border-muted-foreground/40 bg-muted/30 text-muted-foreground',
+                    )}
+                    title="Click to assign routing"
+                    onClick={() => {
+                      setReassignRow(row.name)
+                      setReassignMachineId(
+                        row.machineId != null ? String(row.machineId) : machines[0]?.id != null ? String(machines[0].id) : '',
+                      )
+                    }}
+                  >
+                    <span className="truncate">{row.machineName || 'unassigned'}</span>
+                  </button>
                 </td>
                 <td className="p-3 whitespace-nowrap">{formatBytes(row.size)}</td>
                 <td className="p-3">{row.paramSize}</td>
@@ -773,6 +854,56 @@ export function ModelsPage() {
             >
               {copyMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Confirm copy
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!reassignRow}
+        onOpenChange={(o) => {
+          if (!o) {
+            setReassignRow(null)
+            setReassignMachineId('')
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Assign model routing</DialogTitle>
+            <DialogDescription>
+              boolab uses this mapping to pick the Ollama host for <span className="font-mono-ui">{reassignRow}</span>.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Machine</Label>
+            <select
+              className="flex h-10 w-full rounded-md border border-border bg-background px-2 text-sm"
+              value={reassignMachineId}
+              onChange={(e) => setReassignMachineId(e.target.value)}
+            >
+              <option value="">Select…</option>
+              {machines.map((m) => (
+                <option key={m.id} value={String(m.id)}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReassignRow(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!reassignRow || !reassignMachineId || assignMut.isPending}
+              onClick={() => {
+                const mid = parseInt(reassignMachineId, 10)
+                if (!reassignRow || !Number.isFinite(mid)) return
+                assignMut.mutate({ model_name: reassignRow, machine_id: mid })
+              }}
+            >
+              {assignMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Save
             </Button>
           </DialogFooter>
         </DialogContent>

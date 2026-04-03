@@ -11,7 +11,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
-from routers import agents, flows, gpu, modelfile_apply, ollama, personas
+from routers import agents, flows, gpu, machines, modelfile_apply, ollama, personas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,7 @@ async def health():
 api = APIRouter(prefix="/api")
 api.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
 api.include_router(modelfile_apply.router, prefix="/models", tags=["models"])
+api.include_router(machines.router, prefix="/machines", tags=["machines"])
 api.include_router(gpu.router, prefix="/gpu", tags=["gpu"])
 api.include_router(personas.router, prefix="/personas", tags=["personas"])
 api.include_router(agents.router, prefix="/agents", tags=["agents"])

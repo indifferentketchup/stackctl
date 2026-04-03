@@ -1,29 +1,37 @@
-"""GPU / Ollama environment config — status from Ollama APIs, desired config SQLite, NSSM via SSH."""
+"""GPU / Ollama environment config — status from Ollama APIs, desired config SQLite, NSSM or systemd via SSH."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+import shlex
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 import aiosqlite
 import asyncssh
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from auth_deps import require_admin
 from db import DB_PATH
+from machine_queries import machine_row
 from sam_ssh import (
     connect_sam_desktop,
+    connect_ssh,
     iter_ssh_cmd_lines,
     nssm_cmd_get_app_environment_extra,
     nssm_cmd_service_action,
     nssm_cmd_set_app_environment_extra,
+    sam_desktop_host,
+    sam_desktop_user,
+    ssh_remove_file,
+    ssh_write_file,
 )
 from routers.ollama import _ollama_base, _sse
 
@@ -50,6 +58,52 @@ NSSM_FORM_KEYS = (
     "OLLAMA_NUM_PARALLEL",
     "OLLAMA_HOST",
 )
+
+
+async def _gpu_machine_for(machine_id: int | None) -> dict[str, Any]:
+    if machine_id is None:
+        return {
+            "id": None,
+            "name": "sam-desktop",
+            "ollama_url": _ollama_base(),
+            "ssh_host": sam_desktop_host(),
+            "ssh_user": sam_desktop_user(),
+            "ssh_type": "nssm",
+        }
+    row = await machine_row(machine_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    return row
+
+
+async def _connect_for_gpu_machine(m: dict[str, Any]) -> asyncssh.SSHClientConnection:
+    if m.get("id") is None:
+        return await connect_sam_desktop()
+    h = (m.get("ssh_host") or "").strip()
+    u = (m.get("ssh_user") or "").strip()
+    if not h or not u:
+        raise OSError("Machine has no SSH host/user configured")
+    return await connect_ssh(h, u)
+
+
+def _parse_systemd_environment(stdout: str) -> dict[str, str]:
+    raw = (stdout or "").strip()
+    if not raw or raw == "-":
+        return {}
+    if raw.startswith("Environment="):
+        raw = raw[len("Environment=") :].strip()
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        parts = raw.split()
+    env: dict[str, str] = {}
+    for p in parts:
+        if "=" in p:
+            k, _, v = p.partition("=")
+            k, v = k.strip(), v.strip().strip('"')
+            if k:
+                env[k] = v
+    return env
 
 
 def _extract_gpu_info(ps: dict[str, Any]) -> str:
@@ -108,8 +162,9 @@ def _vram_from_models(ps: dict[str, Any]) -> int | None:
 
 
 @router.get("/status", dependencies=[Depends(require_admin)])
-async def gpu_status():
-    base = _ollama_base()
+async def gpu_status(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
+    base = str(m["ollama_url"]).rstrip("/")
     ps: dict[str, Any] = {}
     version_str = ""
     try:
@@ -134,6 +189,9 @@ async def gpu_status():
         "running_models": running_models,
         "vram_used_bytes": _vram_from_models(ps),
         "gpu_info": _extract_gpu_info(ps) or None,
+        "machine_id": m.get("id"),
+        "machine_name": m.get("name"),
+        "ssh_type": m.get("ssh_type"),
     }
 
 
@@ -289,13 +347,28 @@ def _parse_nssm_app_environment_extra(stdout: str, stderr: str, exit_code: int) 
 
 
 @router.get("/nssm-env", dependencies=[Depends(require_admin)])
-async def get_nssm_env():
+async def get_nssm_env(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await _connect_for_gpu_machine(m)
         except OSError as e:
             return {"env": {}, "error": str(e)}
+        st = str(m.get("ssh_type") or "nssm").lower()
+        if st == "systemd":
+            r = await conn.run(
+                "sudo -n systemctl show ollama -p Environment --value",
+                check=False,
+                encoding="utf-8",
+            )
+            code = r.exit_status if r.exit_status is not None else -1
+            if code != 0:
+                msg = ((r.stderr or r.stdout or "").strip() or f"systemctl exited with code {code}")[:2000]
+                return {"env": {}, "error": msg}
+            parsed = _parse_systemd_environment(r.stdout or "")
+            env = {k: parsed.get(k, "") for k in NSSM_FORM_KEYS}
+            return {"env": env, "raw": (r.stdout or "").strip()}
         r = await conn.run(nssm_cmd_get_app_environment_extra(), check=False, encoding="utf-8")
         code = r.exit_status if r.exit_status is not None else -1
         raw_out = (r.stdout or "").strip()
@@ -323,11 +396,11 @@ def _pairs_from_body(body: NssmEnvBody) -> list[str]:
     return pairs
 
 
-async def _stream_ssh_cmd(cmd: str) -> AsyncIterator[bytes]:
+async def _stream_ssh_cmd_for_machine(m: dict[str, Any], cmd: str) -> AsyncIterator[bytes]:
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await _connect_for_gpu_machine(m)
         except OSError as e:
             yield _sse(json.dumps({"type": "error", "message": str(e)}))
             return
@@ -354,17 +427,69 @@ async def _stream_ssh_cmd(cmd: str) -> AsyncIterator[bytes]:
             await conn.wait_closed()
 
 
-async def _nssm_env_apply_gen(body: NssmEnvBody) -> AsyncIterator[bytes]:
+async def _systemd_dropin_apply_gen(body: NssmEnvBody, m: dict[str, Any]) -> AsyncIterator[bytes]:
+    pairs = _pairs_from_body(body)
+    content = "[Service]\n" + "\n".join(f"Environment={p}" for p in pairs) + "\n"
+    conn: asyncssh.SSHClientConnection | None = None
+    tmp = f"/tmp/ollamactl_override_{uuid.uuid4().hex}.conf"
+    qtmp = shlex.quote(tmp)
+    try:
+        try:
+            conn = await _connect_for_gpu_machine(m)
+        except OSError as e:
+            yield _sse(json.dumps({"type": "error", "message": str(e)}))
+            return
+        await ssh_write_file(conn, tmp, content)
+        cmd = (
+            f"sudo mkdir -p /etc/systemd/system/ollama.service.d && "
+            f"sudo mv {qtmp} /etc/systemd/system/ollama.service.d/99-ollamactl.conf && "
+            f"sudo chmod 644 /etc/systemd/system/ollama.service.d/99-ollamactl.conf && "
+            f"sudo systemctl daemon-reload"
+        )
+        exit_c: int | None = None
+        async for text, code in iter_ssh_cmd_lines(conn, cmd):
+            if text == "__end__":
+                exit_c = code
+                break
+            yield _sse(json.dumps({"type": "log", "line": text}))
+        if exit_c is None or exit_c != 0:
+            yield _sse(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"systemd drop-in failed with code {exit_c if exit_c is not None else -1}",
+                    }
+                )
+            )
+            return
+        yield _sse(json.dumps({"type": "done", "success": True}))
+    finally:
+        if conn:
+            try:
+                await ssh_remove_file(conn, tmp)
+            except (OSError, asyncssh.Error):
+                pass
+            conn.close()
+            await conn.wait_closed()
+
+
+async def _nssm_env_apply_gen(body: NssmEnvBody, m: dict[str, Any]) -> AsyncIterator[bytes]:
+    st = str(m.get("ssh_type") or "nssm").lower()
+    if st == "systemd":
+        async for chunk in _systemd_dropin_apply_gen(body, m):
+            yield chunk
+        return
     pairs = _pairs_from_body(body)
     cmd = nssm_cmd_set_app_environment_extra(pairs)
-    async for chunk in _stream_ssh_cmd(cmd):
+    async for chunk in _stream_ssh_cmd_for_machine(m, cmd):
         yield chunk
 
 
 @router.post("/nssm-env", dependencies=[Depends(require_admin)])
-async def post_nssm_env(body: NssmEnvBody):
+async def post_nssm_env(body: NssmEnvBody, machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     return StreamingResponse(
-        _nssm_env_apply_gen(body),
+        _nssm_env_apply_gen(body, m),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -374,12 +499,16 @@ async def post_nssm_env(body: NssmEnvBody):
     )
 
 
-async def _restart_ollama_gen() -> AsyncIterator[bytes]:
-    cmd = nssm_cmd_service_action("restart")
+async def _restart_ollama_gen(m: dict[str, Any]) -> AsyncIterator[bytes]:
+    st = str(m.get("ssh_type") or "nssm").lower()
+    if st == "systemd":
+        cmd = "sudo -n systemctl restart ollama"
+    else:
+        cmd = nssm_cmd_service_action("restart")
     conn: asyncssh.SSHClientConnection | None = None
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await _connect_for_gpu_machine(m)
         except OSError as e:
             yield _sse(json.dumps({"type": "error", "message": str(e)}))
             return
@@ -400,7 +529,7 @@ async def _restart_ollama_gen() -> AsyncIterator[bytes]:
             )
             return
 
-        base = _ollama_base()
+        base = str(m["ollama_url"]).rstrip("/")
         deadline = time.monotonic() + 15.0
         version_str = ""
         while time.monotonic() < deadline:
@@ -437,9 +566,10 @@ async def _restart_ollama_gen() -> AsyncIterator[bytes]:
 
 
 @router.post("/restart-ollama", dependencies=[Depends(require_admin)])
-async def restart_ollama():
+async def restart_ollama(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     return StreamingResponse(
-        _restart_ollama_gen(),
+        _restart_ollama_gen(m),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -449,16 +579,23 @@ async def restart_ollama():
     )
 
 
-async def _simple_nssm_action_gen(action: str) -> AsyncIterator[bytes]:
+async def _simple_service_action_gen(action: str, m: dict[str, Any]) -> AsyncIterator[bytes]:
+    st = str(m.get("ssh_type") or "nssm").lower()
+    if st == "systemd":
+        cmd = f"sudo -n systemctl {action} ollama"
+        async for chunk in _stream_ssh_cmd_for_machine(m, cmd):
+            yield chunk
+        return
     cmd = nssm_cmd_service_action(action)
-    async for chunk in _stream_ssh_cmd(cmd):
+    async for chunk in _stream_ssh_cmd_for_machine(m, cmd):
         yield chunk
 
 
 @router.post("/stop-ollama", dependencies=[Depends(require_admin)])
-async def stop_ollama():
+async def stop_ollama(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     return StreamingResponse(
-        _simple_nssm_action_gen("stop"),
+        _simple_service_action_gen("stop", m),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -469,9 +606,10 @@ async def stop_ollama():
 
 
 @router.post("/start-ollama", dependencies=[Depends(require_admin)])
-async def start_ollama():
+async def start_ollama(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     return StreamingResponse(
-        _simple_nssm_action_gen("start"),
+        _simple_service_action_gen("start", m),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -498,14 +636,27 @@ def _normalize_service_status(raw: str, exit_code: int) -> str:
 
 
 @router.get("/ollama-service-status")
-async def ollama_service_status():
+async def ollama_service_status(machine_id: int | None = Query(None)):
+    m = await _gpu_machine_for(machine_id)
     conn: asyncssh.SSHClientConnection | None = None
     raw_combined = ""
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await _connect_for_gpu_machine(m)
         except OSError as e:
             return {"status": "Unknown", "raw": "", "error": str(e)}
+        st = str(m.get("ssh_type") or "nssm").lower()
+        if st == "systemd":
+            r = await conn.run("sudo -n systemctl is-active ollama", check=False, encoding="utf-8")
+            out = (r.stdout or "").strip().lower()
+            raw_combined = ((r.stdout or "") + (r.stderr or "")).strip()
+            if out == "active":
+                status = "Running"
+            elif out in ("inactive", "failed"):
+                status = "Stopped"
+            else:
+                status = "Unknown"
+            return {"status": status, "raw": raw_combined}
         r = await conn.run(nssm_cmd_service_action("status"), check=False, encoding="utf-8")
         out = (r.stdout or "").strip()
         err = (r.stderr or "").strip()

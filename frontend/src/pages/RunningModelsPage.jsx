@@ -116,12 +116,18 @@ export function RunningModelsPage() {
       <div className="grid gap-4 sm:grid-cols-2">
         {list.map((m) => {
           const name = m.name || m.model || 'unknown'
+          const host = m.source_machine_name || null
           const exp = parseExpiry(m.expires_at)
           const vram = m.size_vram ?? m.vram ?? m.size
           return (
-            <Card key={name}>
+            <Card key={`${name}-${host || 'default'}`}>
               <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
-                <CardTitle className="font-mono-ui text-base break-all">{name}</CardTitle>
+                <div className="min-w-0 space-y-1">
+                  <CardTitle className="font-mono-ui text-base break-all">{name}</CardTitle>
+                  {host ? (
+                    <p className="text-xs text-muted-foreground font-medium">Host: {host}</p>
+                  ) : null}
+                </div>
                 <Cpu className="h-5 w-5 shrink-0 text-primary opacity-80" />
               </CardHeader>
               <CardContent className="space-y-3 text-sm">

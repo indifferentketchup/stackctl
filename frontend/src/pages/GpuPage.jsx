@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { ChevronDown, Loader2, Monitor } from 'lucide-react'
+import { listMachines } from '@/api/machines.js'
 import {
   applyNssmEnv,
   fetchNssmEnv,
@@ -21,8 +23,6 @@ import {
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { cn } from '@/lib/utils.js'
-
-const SAM_DESKTOP_LABEL = 'sam-desktop'
 
 const ENV_DEFAULTS = {
   CUDA_VISIBLE_DEVICES: '0,1',
@@ -102,21 +102,33 @@ OLLAMA_KEEP_ALIVE=30m`,
 
 export function GpuPage() {
   const qc = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const machineFromUrl = searchParams.get('machine')
+  const { data: machinePack } = useQuery({
+    queryKey: ['machines'],
+    queryFn: listMachines,
+  })
+  const machines = machinePack?.machines ?? []
+  const selectedMachineId =
+    machineFromUrl && machines.some((m) => String(m.id) === machineFromUrl)
+      ? machineFromUrl
+      : ''
+
   const qStatus = useQuery({
-    queryKey: ['gpu-status'],
-    queryFn: getGpuStatus,
+    queryKey: ['gpu-status', selectedMachineId || 'default'],
+    queryFn: () => getGpuStatus(selectedMachineId || undefined),
     refetchInterval: 15_000,
     retry: false,
   })
   const qSvc = useQuery({
-    queryKey: ['gpu-ollama-service-status'],
-    queryFn: fetchOllamaServiceStatus,
+    queryKey: ['gpu-ollama-service-status', selectedMachineId || 'default'],
+    queryFn: () => fetchOllamaServiceStatus(selectedMachineId || undefined),
     refetchInterval: 15_000,
     retry: false,
   })
   const qNssm = useQuery({
-    queryKey: ['gpu-nssm-env'],
-    queryFn: fetchNssmEnv,
+    queryKey: ['gpu-nssm-env', selectedMachineId || 'default'],
+    queryFn: () => fetchNssmEnv(selectedMachineId || undefined),
     retry: false,
   })
 
@@ -203,17 +215,19 @@ export function GpuPage() {
       return
     }
     setApplyBusy(true)
-    const ok = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent))
+    const mid = selectedMachineId || undefined
+    const ok = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent, undefined, mid))
     setApplyBusy(false)
     if (ok) {
       setNeedsRestartHint(true)
       qc.invalidateQueries({ queryKey: ['gpu-nssm-env'] })
     }
-  }, [draft, openFreshTerminal, qc, runStream])
+  }, [draft, openFreshTerminal, qc, runStream, selectedMachineId])
 
   const handleRestartOnly = useCallback(async () => {
     setApplyBusy(true)
-    const ok = await runStream('', (onEvent) => restartOllama(onEvent))
+    const mid = selectedMachineId || undefined
+    const ok = await runStream('', (onEvent) => restartOllama(onEvent, undefined, mid))
     setApplyBusy(false)
     if (ok) {
       setNeedsRestartHint(false)
@@ -221,7 +235,7 @@ export function GpuPage() {
       qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
       qc.invalidateQueries({ queryKey: ['gpu-nssm-env'] })
     }
-  }, [qc, runStream])
+  }, [qc, runStream, selectedMachineId])
 
   const handleApplyAndRestart = useCallback(async () => {
     const n = Number(draft.OLLAMA_MAX_LOADED_MODELS)
@@ -234,7 +248,8 @@ export function GpuPage() {
       return
     }
     setApplyBusy(true)
-    const ok1 = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent))
+    const mid = selectedMachineId || undefined
+    const ok1 = await runStream('', (onEvent) => applyNssmEnv(envPayload(draft), onEvent, undefined, mid))
     if (!ok1) {
       setApplyBusy(false)
       return
@@ -261,7 +276,7 @@ export function GpuPage() {
           }
           setTerminalResult('success')
         }
-      })
+      }, undefined, mid)
       if (!sawDone && !sawErr) {
         setTerminalLines((p) => [...p, 'Stream ended without completion'])
         setTerminalResult('failed')
@@ -279,38 +294,71 @@ export function GpuPage() {
       setTerminalRunning(false)
       setApplyBusy(false)
     }
-  }, [draft, qc, runStream])
+  }, [draft, qc, runStream, selectedMachineId])
 
   const handleStop = useCallback(async () => {
     setApplyBusy(true)
-    const ok = await runStream('', (onEvent) => stopOllama(onEvent))
+    const mid = selectedMachineId || undefined
+    const ok = await runStream('', (onEvent) => stopOllama(onEvent, undefined, mid))
     setApplyBusy(false)
     if (ok) {
       qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
       qc.invalidateQueries({ queryKey: ['gpu-status'] })
     }
-  }, [qc, runStream])
+  }, [qc, runStream, selectedMachineId])
 
   const handleStart = useCallback(async () => {
     setApplyBusy(true)
-    const ok = await runStream('', (onEvent) => startOllama(onEvent))
+    const mid = selectedMachineId || undefined
+    const ok = await runStream('', (onEvent) => startOllama(onEvent, undefined, mid))
     setApplyBusy(false)
     if (ok) {
       qc.invalidateQueries({ queryKey: ['gpu-ollama-service-status'] })
       qc.invalidateQueries({ queryKey: ['gpu-status'] })
     }
-  }, [qc, runStream])
+  }, [qc, runStream, selectedMachineId])
 
   const loadPreset = useCallback((preset) => {
     setDraft((d) => ({ ...d, ...preset.values }))
   }, [])
 
+  const hostLabel = useMemo(() => {
+    if (selectedMachineId) {
+      const m = machines.find((x) => String(x.id) === selectedMachineId)
+      return m?.name || 'Machine'
+    }
+    return 'sam-desktop'
+  }, [machines, selectedMachineId])
+
+  const sshKind = qStatus.data?.ssh_type || (selectedMachineId ? 'nssm' : 'nssm')
+
   return (
     <div className="mx-auto max-w-5xl space-y-8">
-      <header className="space-y-2">
+      <header className="space-y-3">
         <h1 className="text-2xl font-bold">GPU &amp; Inference Config</h1>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <Label className="text-xs text-muted-foreground shrink-0">Target host</Label>
+          <select
+            className="flex h-9 max-w-md rounded-md border border-border bg-background px-2 text-sm"
+            value={selectedMachineId}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v) setSearchParams({ machine: v })
+              else setSearchParams({})
+            }}
+          >
+            <option value="">sam-desktop (default)</option>
+            {machines.map((m) => (
+              <option key={m.id} value={String(m.id)}>
+                {m.name} — {m.gpu_label || m.ollama_url}
+              </option>
+            ))}
+          </select>
+        </div>
         <p className="text-sm text-muted-foreground">
-          NSSM environment and Ollama service on {SAM_DESKTOP_LABEL} are updated live over SSH from this control plane.
+          {sshKind === 'systemd'
+            ? `systemd Ollama on ${hostLabel} — env via drop-in override over SSH.`
+            : `NSSM Ollama service on ${hostLabel} — AppEnvironmentExtra over SSH.`}
         </p>
       </header>
 
@@ -346,10 +394,10 @@ export function GpuPage() {
                 if (ver) {
                   const s = String(ver)
                   const shown = s.toLowerCase().startsWith('v') ? s : `v${s}`
-                  return `${shown} on ${SAM_DESKTOP_LABEL}`
+                  return `${shown} on ${hostLabel}`
                 }
                 if (qStatus.isLoading) return `Loading Ollama version…`
-                return `— on ${SAM_DESKTOP_LABEL}`
+                return `— on ${hostLabel}`
               })()}
               {runningModels.length > 0 || qStatus.data?.vram_used_bytes != null ? (
                 <>
@@ -442,14 +490,24 @@ export function GpuPage() {
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Environment variables</h2>
         <p className="text-sm text-muted-foreground">
-          Values load from NSSM on the remote host. Applying updates <code className="font-mono-ui text-xs">AppEnvironmentExtra</code>{' '}
-          for <code className="font-mono-ui text-xs">OllamaService</code>.
+          {sshKind === 'systemd' ? (
+            <>
+              Values read from <code className="font-mono-ui text-xs">systemctl show ollama</code>. Applying writes a systemd
+              drop-in at <code className="font-mono-ui text-xs">/etc/systemd/system/ollama.service.d/99-ollamactl.conf</code> and
+              runs <code className="font-mono-ui text-xs">daemon-reload</code>.
+            </>
+          ) : (
+            <>
+              Values load from NSSM on the remote host. Applying updates <code className="font-mono-ui text-xs">AppEnvironmentExtra</code>{' '}
+              for <code className="font-mono-ui text-xs">OllamaService</code>.
+            </>
+          )}
         </p>
 
         {qNssm.isLoading && (
           <div className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
-            Loading NSSM environment…
+            Loading remote environment…
           </div>
         )}
 
@@ -587,13 +645,10 @@ export function GpuPage() {
         </CollapsibleTrigger>
         <CollapsibleContent>
           <pre className="border-t border-border px-4 py-3 font-mono-ui text-xs leading-relaxed text-muted-foreground md:text-sm">
-            {`${SAM_DESKTOP_LABEL}
-├── CPU: Windows 11
-├── GPU 0: RTX 5090 — 32GB VRAM  
-├── GPU 1: RTX 4080 Super — 16GB VRAM (if installed)
-├── Ollama: NSSM service "OllamaService"
-├── Binary: D:\\ollama\\ollama.exe
-└── NSSM: C:\\Tools\\nssm.exe`}
+            {`${hostLabel} (reference)
+├── sam-desktop: Windows 11, RTX 5090, NSSM OllamaService
+├── gpu: Ubuntu 24.04, RTX 4080 Super, systemd ollama
+└── Pick "Target host" above for SSH env + service controls`}
           </pre>
         </CollapsibleContent>
       </Collapsible>

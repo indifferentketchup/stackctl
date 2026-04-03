@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -18,11 +19,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_deps import require_admin
-from routers.ollama import _ollama_base, _sse, _stream_ollama_pull
+from machine_queries import assignment_for_model
+from routers.ollama import _sse, _stream_ollama_pull
 from sam_ssh import (
     connect_sam_desktop,
+    connect_ssh,
     iter_ssh_cmd_lines,
     powershell_single_quote,
+    remote_temp_linux_path,
     remote_temp_modelfile_path,
     sam_desktop_host,
     sam_desktop_user,
@@ -177,29 +181,54 @@ async def _ssh_ollama_apply_stream(
     *,
     emit_done: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
+    assign = await assignment_for_model(name)
+    if not assign:
+        yield {
+            "type": "error",
+            "message": f"Model '{name}' is not assigned to any machine in ollamactl",
+        }
+        return
+    host = (assign.get("ssh_host") or "").strip()
+    user = (assign.get("ssh_user") or "").strip()
+    ssh_type = (str(assign.get("ssh_type") or "nssm")).strip().lower()
+    if not host or not user:
+        yield {"type": "error", "message": "Machine has no SSH host/user configured"}
+        return
+
     fname = f"ollamactl_modelfile_{uuid.uuid4().hex}.txt"
     conn: asyncssh.SSHClientConnection | None = None
     remote_path = ""
     try:
         try:
-            conn = await connect_sam_desktop()
+            conn = await connect_ssh(host, user)
         except OSError as e:
             yield {"type": "error", "message": str(e)}
             return
 
-        remote_path = await remote_temp_modelfile_path(conn, fname)
+        if ssh_type == "systemd":
+            remote_path = await remote_temp_linux_path(conn, "mf")
+        else:
+            remote_path = await remote_temp_modelfile_path(conn, fname)
         await ssh_write_file(conn, remote_path, modelfile)
 
+        qn = shlex.quote(name)
+
         if overwrite:
-            show_ps = (
-                "powershell -NoProfile -Command "
-                + powershell_single_quote(f"ollama show {name}")
-            )
-            chk = await conn.run(show_ps, check=False, encoding="utf-8")
+            if ssh_type == "systemd":
+                chk = await conn.run(f"ollama show {qn}", check=False, encoding="utf-8")
+            else:
+                show_ps = (
+                    "powershell -NoProfile -Command "
+                    + powershell_single_quote(f"ollama show {name}")
+                )
+                chk = await conn.run(show_ps, check=False, encoding="utf-8")
             if chk.exit_status == 0:
-                rm_ps = "powershell -NoProfile -Command " + powershell_single_quote(f"ollama rm {name}")
+                if ssh_type == "systemd":
+                    rm_cmd = f"ollama rm {qn}"
+                else:
+                    rm_cmd = "powershell -NoProfile -Command " + powershell_single_quote(f"ollama rm {name}")
                 exit_rm: int | None = None
-                async for text, code in iter_ssh_cmd_lines(conn, rm_ps):
+                async for text, code in iter_ssh_cmd_lines(conn, rm_cmd):
                     if text == "__end__":
                         exit_rm = code
                         break
@@ -209,9 +238,12 @@ async def _ssh_ollama_apply_stream(
                     return
 
         create_inner = f"ollama create {name} -f {remote_path}"
-        create_ps = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
+        if ssh_type == "systemd":
+            create_cmd = f"ollama create {qn} -f {shlex.quote(remote_path)}"
+        else:
+            create_cmd = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
         exit_c: int | None = None
-        async for text, code in iter_ssh_cmd_lines(conn, create_ps):
+        async for text, code in iter_ssh_cmd_lines(conn, create_cmd):
             if text == "__end__":
                 exit_c = code
                 break
@@ -287,6 +319,18 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
     if not name:
         yield _sse(json.dumps({"type": "error", "message": "name is required"}))
         return
+    assign = await assignment_for_model(name)
+    if not assign:
+        yield _sse(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"Model '{name}' is not assigned to any machine in ollamactl",
+                }
+            )
+        )
+        return
+    base = str(assign["ollama_url"]).rstrip("/")
     tpl = (body.template or "chatml").strip().lower()
     if tpl not in TEMPLATES:
         yield _sse(json.dumps({"type": "error", "message": f"Invalid template: {body.template}"}))
@@ -303,7 +347,7 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
 
     async def _pull_to_queue() -> None:
         try:
-            async for raw in _stream_ollama_pull(hf):
+            async for raw in _stream_ollama_pull(hf, base_override=base):
                 await q.put(raw)
         finally:
             await q.put(None)
@@ -360,7 +404,6 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
         yield _sse(json.dumps({"type": "error", "message": "Pull did not complete successfully"}))
         return
 
-    base = _ollama_base()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             r = await client.post(f"{base}/api/show", json={"name": hf, "verbose": True})

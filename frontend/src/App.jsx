@@ -8,6 +8,7 @@ import { ImportPage } from '@/pages/ImportPage.jsx'
 import { PersonasPage } from '@/pages/PersonasPage.jsx'
 import { PlaceholderPage } from '@/pages/PlaceholderPage.jsx'
 import { GpuPage } from '@/pages/GpuPage.jsx'
+import { MachinesPage } from '@/pages/MachinesPage.jsx'
 import { AgentsPage } from '@/pages/AgentsPage.jsx'
 import { AgentEditorPage } from '@/pages/AgentEditorPage.jsx'
 import { FlowsPage } from '@/pages/FlowsPage.jsx'
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/import" element={<ImportPage />} />
           <Route path="/personas" element={<PersonasPage />} />
           <Route path="/gpu" element={<GpuPage />} />
+          <Route path="/machines" element={<MachinesPage />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/new" element={<AgentEditorPage />} />

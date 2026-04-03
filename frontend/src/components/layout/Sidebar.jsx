@@ -11,6 +11,7 @@ import {
   BookOpen,
   Bot,
   GitBranch,
+  Server,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { listModels } from '@/api/ollama.js'
@@ -78,6 +79,10 @@ export function Sidebar() {
         <NavLink to="/running" className={linkClass}>
           <Cpu className="h-4 w-4 shrink-0" />
           Running
+        </NavLink>
+        <NavLink to="/machines" className={linkClass}>
+          <Server className="h-4 w-4 shrink-0" />
+          Machines
         </NavLink>
 
         <div className="my-2 border-t border-border" />

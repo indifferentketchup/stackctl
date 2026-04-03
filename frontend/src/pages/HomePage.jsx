@@ -9,6 +9,7 @@ import {
   Layers,
   Monitor,
   PlusCircle,
+  Server,
   Upload,
   Users,
 } from 'lucide-react'
@@ -30,6 +31,13 @@ const cards = [
     title: 'Running Models',
     description: 'VRAM usage, keep-alive timers, per-model unload.',
     icon: Cpu,
+    phase: 'Phase 1',
+  },
+  {
+    to: '/machines',
+    title: 'Machines',
+    description: 'Multi-host routing, assignments, live status.',
+    icon: Server,
     phase: 'Phase 1',
   },
   {
