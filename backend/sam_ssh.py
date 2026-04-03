@@ -36,24 +36,19 @@ def _cmd_double_quoted_token(s: str) -> str:
 
 
 def nssm_cmd_get_app_environment_extra() -> str:
-    return (
-        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} get "
-        f"{OLLAMA_SERVICE} AppEnvironmentExtra"
-    )
+    inner = f'"{NSSM_EXE}" get {OLLAMA_SERVICE} AppEnvironmentExtra'
+    return f'cmd /c "{inner}"'
 
 
 def nssm_cmd_set_app_environment_extra(pairs: list[str]) -> str:
     args = " ".join(_cmd_double_quoted_token(p) for p in pairs)
-    return (
-        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} set "
-        f"{OLLAMA_SERVICE} AppEnvironmentExtra {args}"
-    )
+    inner = f'"{NSSM_EXE}" set {OLLAMA_SERVICE} AppEnvironmentExtra {args}'
+    return f'cmd /c "{inner}"'
 
 
 def nssm_cmd_service_action(action: str) -> str:
-    return (
-        f"cmd /c {_cmd_double_quoted_token(NSSM_EXE)} {action} {OLLAMA_SERVICE}"
-    )
+    inner = f'"{NSSM_EXE}" {action} {OLLAMA_SERVICE}'
+    return f'cmd /c "{inner}"'
 
 
 async def connect_ssh(host: str, user: str) -> asyncssh.SSHClientConnection:
