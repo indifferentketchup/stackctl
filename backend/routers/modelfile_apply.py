@@ -12,14 +12,16 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import aiosqlite
 import asyncssh
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth_deps import require_admin
-from machine_queries import assignment_for_model
+from db import DB_PATH
+from machine_queries import assignment_for_model, machine_row
 from routers.ollama import _sse, _stream_ollama_pull
 from sam_ssh import (
     connect_sam_desktop,
@@ -46,6 +48,7 @@ class ApplyBody(BaseModel):
     name: str
     modelfile: str
     overwrite: bool = False
+    machine_id: int | None = None
 
 
 class PullAndCreateBody(BaseModel):
@@ -53,6 +56,49 @@ class PullAndCreateBody(BaseModel):
     name: str
     template: str = "chatml"
     parameters: dict[str, Any] = {}
+    machine_id: int | None = None
+
+
+async def _require_assign(model_name: str, machine_id: int | None) -> dict[str, Any]:
+    n = (model_name or "").strip()
+    if machine_id is not None:
+        row = await machine_row(machine_id)
+        if not row:
+            raise HTTPException(status_code=400, detail="Unknown machine_id")
+        return {
+            "model_name": n,
+            "machine_id": row["id"],
+            "machine_name": row["name"],
+            "ollama_url": row["ollama_url"],
+            "ssh_host": row["ssh_host"],
+            "ssh_user": row["ssh_user"],
+            "ssh_type": row["ssh_type"],
+        }
+    assign = await assignment_for_model(n)
+    if not assign:
+        raise HTTPException(
+            status_code=422,
+            detail="No machine assigned. Provide machine_id in the request.",
+        )
+    return assign
+
+
+async def _upsert_model_assignment(model_name: str, machine_id: int) -> None:
+    n = (model_name or "").strip()
+    if not n:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO model_assignments (model_name, machine_id, created_at, updated_at)
+            VALUES (?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(model_name) DO UPDATE SET
+                machine_id = excluded.machine_id,
+                updated_at = datetime('now')
+            """,
+            (n, machine_id),
+        )
+        await db.commit()
 
 
 def _kv_blob_size(info: dict[str, Any] | None) -> int | None:
@@ -178,16 +224,10 @@ async def _ssh_ollama_apply_stream(
     name: str,
     modelfile: str,
     overwrite: bool,
+    assign: dict[str, Any],
     *,
     emit_done: bool = True,
 ) -> AsyncIterator[dict[str, Any]]:
-    assign = await assignment_for_model(name)
-    if not assign:
-        yield {
-            "type": "error",
-            "message": f"Model '{name}' is not assigned to any machine in ollamactl",
-        }
-        return
     host = (assign.get("ssh_host") or "").strip()
     user = (assign.get("ssh_user") or "").strip()
     ssh_type = (str(assign.get("ssh_type") or "nssm")).strip().lower()
@@ -252,6 +292,9 @@ async def _ssh_ollama_apply_stream(
         if exit_c is None or exit_c != 0:
             yield {"type": "error", "message": f"ollama create exited with code {exit_c}"}
             return
+        mid = assign.get("machine_id")
+        if mid is not None:
+            await _upsert_model_assignment(name, int(mid))
         if emit_done:
             yield {"type": "done", "success": True}
     finally:
@@ -262,7 +305,7 @@ async def _ssh_ollama_apply_stream(
             await conn.wait_closed()
 
 
-async def _apply_sse_gen(body: ApplyBody) -> AsyncIterator[bytes]:
+async def _apply_sse_gen(body: ApplyBody, assign: dict[str, Any] | None) -> AsyncIterator[bytes]:
     n = (body.name or "").strip()
     mf = body.modelfile or ""
     if not n:
@@ -271,7 +314,8 @@ async def _apply_sse_gen(body: ApplyBody) -> AsyncIterator[bytes]:
     if not mf.strip():
         yield _sse(json.dumps({"type": "error", "message": "modelfile is required"}))
         return
-    async for ev in _ssh_ollama_apply_stream(n, mf, body.overwrite):
+    assert assign is not None
+    async for ev in _ssh_ollama_apply_stream(n, mf, body.overwrite, assign):
         yield _sse(json.dumps(ev))
         if ev.get("type") == "error":
             return
@@ -279,8 +323,10 @@ async def _apply_sse_gen(body: ApplyBody) -> AsyncIterator[bytes]:
 
 @router.post("/apply")
 async def apply_modelfile_ssh(body: ApplyBody, _owner: dict = Depends(require_admin)):
+    n = (body.name or "").strip()
+    assign = await _require_assign(n, body.machine_id) if n else None
     return StreamingResponse(
-        _apply_sse_gen(body),
+        _apply_sse_gen(body, assign),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -310,7 +356,9 @@ async def ssh_status():
     return {"connected": connected, "host": host, "user": user, "error": err}
 
 
-async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
+async def _pull_and_create_gen(
+    body: PullAndCreateBody, assign: dict[str, Any] | None
+) -> AsyncIterator[bytes]:
     hf = (body.hf_ref or "").strip()
     name = (body.name or "").strip()
     if not hf:
@@ -319,17 +367,7 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
     if not name:
         yield _sse(json.dumps({"type": "error", "message": "name is required"}))
         return
-    assign = await assignment_for_model(name)
-    if not assign:
-        yield _sse(
-            json.dumps(
-                {
-                    "type": "error",
-                    "message": f"Model '{name}' is not assigned to any machine in ollamactl",
-                }
-            )
-        )
-        return
+    assert assign is not None
     base = str(assign["ollama_url"]).rstrip("/")
     tpl = (body.template or "chatml").strip().lower()
     if tpl not in TEMPLATES:
@@ -439,7 +477,7 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
 
     yield _sse(json.dumps({"type": "log", "line": f"[ssh] applying model as {name}"}))
 
-    async for ev in _ssh_ollama_apply_stream(name, new_mf, True, emit_done=False):
+    async for ev in _ssh_ollama_apply_stream(name, new_mf, True, assign, emit_done=False):
         yield _sse(json.dumps(ev))
         if ev.get("type") == "error":
             return
@@ -462,8 +500,10 @@ async def _pull_and_create_gen(body: PullAndCreateBody) -> AsyncIterator[bytes]:
 
 @router.post("/pull-and-create")
 async def pull_and_create(body: PullAndCreateBody, _owner: dict = Depends(require_admin)):
+    name = (body.name or "").strip()
+    assign = await _require_assign(name, body.machine_id) if name else None
     return StreamingResponse(
-        _pull_and_create_gen(body),
+        _pull_and_create_gen(body, assign),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

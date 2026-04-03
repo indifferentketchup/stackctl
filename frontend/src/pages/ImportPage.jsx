@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { fetchHfRepoFiles, listModels, verifySamPath } from '@/api/ollama.js'
+import { listMachines } from '@/api/machines.js'
 import { consumeModelsSsePost, fetchSshStatus } from '@/api/models.js'
 import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
 import { SshStatusIndicator } from '@/components/SshStatusIndicator.jsx'
@@ -237,6 +238,25 @@ export function ImportPage() {
     queryFn: listModels,
   })
 
+  const { data: machinesRes } = useQuery({
+    queryKey: ['machines'],
+    queryFn: listMachines,
+  })
+  const machinesList = useMemo(() => {
+    const m = machinesRes?.machines
+    return Array.isArray(m) ? m : []
+  }, [machinesRes?.machines])
+
+  const [targetMachineId, setTargetMachineId] = useState(null)
+
+  useEffect(() => {
+    if (!machinesList.length) return
+    setTargetMachineId((prev) => {
+      if (prev != null && machinesList.some((m) => m.id === prev)) return prev
+      return machinesList[0].id
+    })
+  }, [machinesList])
+
   const modelOptions = useMemo(() => {
     const m = tags?.models
     if (!Array.isArray(m)) return []
@@ -432,7 +452,7 @@ export function ImportPage() {
   const startHfPullAndCreate = async () => {
     const ref = effectiveHfRef
     const n = hfCreateName.trim()
-    if (!ref || !n || sshBlocked) return
+    if (!ref || !n || sshBlocked || targetMachineId == null) return
     setCreating(true)
     setTerminalLines([])
     setTerminalResult(null)
@@ -456,6 +476,7 @@ export function ImportPage() {
             num_ctx: guided.params.num_ctx,
             stop: pullCreateStops,
           },
+          machine_id: targetMachineId,
         },
         (ev) => {
           if (ev.type === 'progress') {
@@ -830,6 +851,25 @@ export function ImportPage() {
             ℹ️ HF models tagged as multimodal will pull a vision projector, causing a double FROM and a 500 on load. Use
             Pull &amp; Create below (same flow as the Models page) — it strips the projector and applies the template.
           </div>
+          <div className="space-y-1">
+            <Label>Target machine</Label>
+            <select
+              className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
+              value={targetMachineId ?? ''}
+              onChange={(e) => setTargetMachineId(Number(e.target.value))}
+              disabled={!machinesList.length}
+            >
+              {machinesList.length === 0 ? (
+                <option value="">No machines configured</option>
+              ) : (
+                machinesList.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
             <div className="flex-1 space-y-1">
               <Label>HuggingFace repo</Label>
@@ -901,6 +941,25 @@ export function ImportPage() {
             </div>
           )}
           <div className="space-y-1">
+            <Label>Target machine</Label>
+            <select
+              className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
+              value={targetMachineId ?? ''}
+              onChange={(e) => setTargetMachineId(Number(e.target.value))}
+              disabled={!machinesList.length}
+            >
+              {machinesList.length === 0 ? (
+                <option value="">No machines configured</option>
+              ) : (
+                machinesList.map((m) => (
+                  <option key={`pull-${m.id}`} value={m.id}>
+                    {m.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+          <div className="space-y-1">
             <Label>Pull reference</Label>
             <Input
               className="font-mono-ui text-sm"
@@ -929,7 +988,13 @@ export function ImportPage() {
           )}
           <Button
             onClick={startHfPullAndCreate}
-            disabled={creating || !effectiveHfRef || !hfCreateName.trim() || sshBlocked}
+            disabled={
+              creating ||
+              !effectiveHfRef ||
+              !hfCreateName.trim() ||
+              sshBlocked ||
+              targetMachineId == null
+            }
             title={sshBlocked ? sshBlockTitle : undefined}
           >
             {creating && <Loader2 className="h-4 w-4 animate-spin" />}
