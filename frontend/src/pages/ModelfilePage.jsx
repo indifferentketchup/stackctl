@@ -10,6 +10,7 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react'
+import { listMachines } from '@/api/machines.js'
 import { listModels, showModel } from '@/api/ollama.js'
 import { consumeModelsSsePost } from '@/api/models.js'
 import { ApplyTerminalPanel } from '@/components/ApplyTerminalPanel.jsx'
@@ -85,6 +86,25 @@ export function ModelfilePage() {
     queryFn: listModels,
   })
 
+  const { data: machinesRes } = useQuery({
+    queryKey: ['machines'],
+    queryFn: listMachines,
+  })
+  const machinesList = useMemo(() => {
+    const m = machinesRes?.machines
+    return Array.isArray(m) ? m : []
+  }, [machinesRes?.machines])
+
+  const [targetMachineId, setTargetMachineId] = useState(null)
+
+  useEffect(() => {
+    if (!machinesList.length) return
+    setTargetMachineId((prev) => {
+      if (prev != null && machinesList.some((x) => x.id === prev)) return prev
+      return machinesList[0].id
+    })
+  }, [machinesList])
+
   const modelOptions = useMemo(() => {
     const m = tags?.models
     if (!Array.isArray(m)) return []
@@ -158,7 +178,7 @@ export function ModelfilePage() {
   const runSshApply = async (navigateAfter) => {
     const mf = finalizeModelfile()
     const n = modelName.trim()
-    if (!n) return
+    if (!n || targetMachineId == null) return
     setCreating(true)
     setTerminalLines([])
     setTerminalResult(null)
@@ -170,7 +190,7 @@ export function ModelfilePage() {
     try {
       await consumeModelsSsePost(
         '/api/models/apply',
-        { name: n, modelfile: mf, overwrite: true },
+        { name: n, modelfile: mf, overwrite: true, machine_id: targetMachineId },
         (ev) => {
           if (ev.type === 'log' && ev.line != null) {
             setTerminalLines((prev) => [...prev, String(ev.line)])
@@ -261,6 +281,29 @@ export function ModelfilePage() {
           {syncNote}
         </div>
       )}
+
+      <div className="space-y-1 rounded-md border border-border bg-card/50 px-3 py-3">
+        <Label>Target machine</Label>
+        <select
+          className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
+          value={targetMachineId ?? ''}
+          onChange={(e) => setTargetMachineId(Number(e.target.value))}
+          disabled={!machinesList.length}
+        >
+          {machinesList.length === 0 ? (
+            <option value="">No machines configured</option>
+          ) : (
+            machinesList.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))
+          )}
+        </select>
+        <p className="text-xs text-muted-foreground">
+          Ollama create runs on this host over SSH. Required for create and apply.
+        </p>
+      </div>
 
       <Tabs value={tab} onValueChange={onTabSwitch}>
         <TabsList>
@@ -715,14 +758,18 @@ export function ModelfilePage() {
                 type="button"
                 variant="secondary"
                 onClick={() => runSshApply(false)}
-                disabled={creating || !modelName.trim()}
+                disabled={creating || !modelName.trim() || targetMachineId == null}
               >
                 {creating && <Loader2 className="h-4 w-4 animate-spin" />}
                 Apply to Ollama
               </Button>
             )}
             {isCreate && (
-              <Button type="button" onClick={runCreate} disabled={creating || !modelName.trim()}>
+              <Button
+                type="button"
+                onClick={runCreate}
+                disabled={creating || !modelName.trim() || targetMachineId == null}
+              >
                 {creating && <Loader2 className="h-4 w-4 animate-spin" />}
                 Create Model
               </Button>

@@ -352,6 +352,7 @@ export function ImportPage() {
       return
     }
     if (sshBlocked) return
+    if (targetMachineId == null) return
 
     const quant = quantizeEnabled ? quantChoice : null
     setCreating(true)
@@ -363,8 +364,8 @@ export function ImportPage() {
     let sawErr = false
     try {
       await consumeModelsSsePost(
-        '/api/ollama/create-quantized',
-        { name: n, modelfile, quantize: quant },
+        '/api/models/create-quantized',
+        { name: n, modelfile, quantize: quant, machine_id: targetMachineId },
         (ev) => {
           if (ev.type === 'log' && ev.line != null) {
             setTerminalLines((prev) => [...prev, String(ev.line)])
@@ -545,6 +546,29 @@ export function ImportPage() {
 
       {samNote}
 
+      <div className="space-y-1 rounded-md border border-border bg-card/50 px-3 py-3">
+        <Label>Target machine</Label>
+        <select
+          className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
+          value={targetMachineId ?? ''}
+          onChange={(e) => setTargetMachineId(Number(e.target.value))}
+          disabled={!machinesList.length}
+        >
+          {machinesList.length === 0 ? (
+            <option value="">No machines configured</option>
+          ) : (
+            machinesList.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))
+          )}
+        </select>
+        <p className="text-xs text-muted-foreground">
+          Required for SSH import and HF pull &amp; create. The new model is assigned to this machine.
+        </p>
+      </div>
+
       <select
         className="md:hidden flex h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none ring-ring focus-visible:ring-2"
         value={mainTab}
@@ -679,7 +703,13 @@ export function ImportPage() {
             </div>
             <Button
               onClick={() => runCreate(modelNameGguf, ggufModelfile, 'Import')}
-              disabled={creating || !modelNameGguf.trim() || !ggufPath.trim() || sshBlocked}
+              disabled={
+                creating ||
+                !modelNameGguf.trim() ||
+                !ggufPath.trim() ||
+                sshBlocked ||
+                targetMachineId == null
+              }
               title={sshBlocked ? sshBlockTitle : undefined}
             >
               {creating && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -831,7 +861,8 @@ export function ImportPage() {
                 !modelNameSafe.trim() ||
                 !safetensorsPath.trim() ||
                 (loraMode && !loraBase.trim()) ||
-                sshBlocked
+                sshBlocked ||
+                targetMachineId == null
               }
               title={sshBlocked ? sshBlockTitle : undefined}
             >
@@ -850,25 +881,6 @@ export function ImportPage() {
           <div className="rounded-md border border-border/80 bg-muted/20 px-3 py-2 text-xs text-muted-foreground leading-relaxed">
             ℹ️ HF models tagged as multimodal will pull a vision projector, causing a double FROM and a 500 on load. Use
             Pull &amp; Create below (same flow as the Models page) — it strips the projector and applies the template.
-          </div>
-          <div className="space-y-1">
-            <Label>Target machine</Label>
-            <select
-              className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
-              value={targetMachineId ?? ''}
-              onChange={(e) => setTargetMachineId(Number(e.target.value))}
-              disabled={!machinesList.length}
-            >
-              {machinesList.length === 0 ? (
-                <option value="">No machines configured</option>
-              ) : (
-                machinesList.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))
-              )}
-            </select>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
             <div className="flex-1 space-y-1">
@@ -940,25 +952,6 @@ export function ImportPage() {
               )}
             </div>
           )}
-          <div className="space-y-1">
-            <Label>Target machine</Label>
-            <select
-              className="flex h-9 w-full rounded-md border border-border bg-background px-2 text-sm outline-none ring-ring focus-visible:ring-2"
-              value={targetMachineId ?? ''}
-              onChange={(e) => setTargetMachineId(Number(e.target.value))}
-              disabled={!machinesList.length}
-            >
-              {machinesList.length === 0 ? (
-                <option value="">No machines configured</option>
-              ) : (
-                machinesList.map((m) => (
-                  <option key={`pull-${m.id}`} value={m.id}>
-                    {m.name}
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
           <div className="space-y-1">
             <Label>Pull reference</Label>
             <Input

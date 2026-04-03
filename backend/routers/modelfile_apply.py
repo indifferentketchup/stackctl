@@ -39,6 +39,8 @@ from templates import DEFAULT_STOP_TOKENS, TEMPLATES
 
 router = APIRouter()
 
+_ALLOWED_QUANTIZE = frozenset({"q8_0", "q4_K_S", "q4_K_M"})
+
 _TWO_GB = 2 * 1024 * 1024 * 1024
 
 _FROM_LINE_RE = re.compile(r"(?im)^FROM\s+(.+)$")
@@ -56,6 +58,13 @@ class PullAndCreateBody(BaseModel):
     name: str
     template: str = "chatml"
     parameters: dict[str, Any] = {}
+    machine_id: int | None = None
+
+
+class CreateQuantizedBody(BaseModel):
+    name: str
+    modelfile: str
+    quantize: str | None = None
     machine_id: int | None = None
 
 
@@ -78,7 +87,7 @@ async def _require_assign(model_name: str, machine_id: int | None) -> dict[str, 
     if not assign:
         raise HTTPException(
             status_code=422,
-            detail="No machine assigned. Provide machine_id in the request.",
+            detail="No machine assigned. Select a target machine.",
         )
     return assign
 
@@ -504,6 +513,108 @@ async def pull_and_create(body: PullAndCreateBody, _owner: dict = Depends(requir
     assign = await _require_assign(name, body.machine_id) if name else None
     return StreamingResponse(
         _pull_and_create_gen(body, assign),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _create_quantized_sse_gen(body: CreateQuantizedBody) -> AsyncIterator[bytes]:
+    name = (body.name or "").strip()
+    mf = body.modelfile or ""
+    if not name:
+        yield _sse(json.dumps({"type": "error", "message": "name is required"}))
+        return
+    if not mf.strip():
+        yield _sse(json.dumps({"type": "error", "message": "modelfile is required"}))
+        return
+    raw_q = (body.quantize or "").strip() or None
+    if raw_q and raw_q not in _ALLOWED_QUANTIZE:
+        yield _sse(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"quantize must be one of: {', '.join(sorted(_ALLOWED_QUANTIZE))}",
+                }
+            )
+        )
+        return
+
+    try:
+        assign = await _require_assign(name, body.machine_id)
+    except HTTPException as e:
+        msg = e.detail if isinstance(e.detail, str) else str(e.detail)
+        yield _sse(json.dumps({"type": "error", "message": msg}))
+        return
+
+    host = (assign.get("ssh_host") or "").strip()
+    user = (assign.get("ssh_user") or "").strip()
+    ssh_type = (str(assign.get("ssh_type") or "nssm")).strip().lower()
+    if not host or not user:
+        yield _sse(json.dumps({"type": "error", "message": "Machine has no SSH host/user configured"}))
+        return
+
+    fname = f"ollamactl_quant_{uuid.uuid4().hex}.txt"
+    conn: asyncssh.SSHClientConnection | None = None
+    remote_path = ""
+    try:
+        try:
+            conn = await connect_ssh(host, user)
+        except OSError as e:
+            yield _sse(json.dumps({"type": "error", "message": str(e)}))
+            return
+
+        if ssh_type == "systemd":
+            remote_path = await remote_temp_linux_path(conn, "quant")
+        else:
+            remote_path = await remote_temp_modelfile_path(conn, fname)
+        await ssh_write_file(conn, remote_path, mf)
+
+        if raw_q:
+            create_inner = f"ollama create {name} --quantize {raw_q} -f {remote_path}"
+        else:
+            create_inner = f"ollama create {name} -f {remote_path}"
+        if ssh_type == "systemd":
+            cmd = create_inner
+        else:
+            cmd = "powershell -NoProfile -Command " + powershell_single_quote(create_inner)
+        exit_c: int | None = None
+        async for text, code in iter_ssh_cmd_lines(conn, cmd):
+            if text == "__end__":
+                exit_c = code
+                break
+            yield _sse(json.dumps({"type": "log", "line": text}))
+
+        if exit_c is None or exit_c != 0:
+            yield _sse(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"ollama create exited with code {exit_c}",
+                    }
+                )
+            )
+            return
+
+        mid = assign.get("machine_id")
+        if mid is not None:
+            await _upsert_model_assignment(name, int(mid))
+        yield _sse(json.dumps({"type": "done", "success": True}))
+    finally:
+        if conn:
+            if remote_path:
+                await ssh_remove_file(conn, remote_path)
+            conn.close()
+            await conn.wait_closed()
+
+
+@router.post("/create-quantized")
+async def create_quantized(body: CreateQuantizedBody, _owner: dict = Depends(require_admin)):
+    return StreamingResponse(
+        _create_quantized_sse_gen(body),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
