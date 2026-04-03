@@ -11,7 +11,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
-from routers import agents, flows, gpu, machines, modelfile_apply, ollama, personas
+from routers import agents, flows, gpu, machines, modelfile_apply, ollama, ollama_proxy, personas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +55,7 @@ api.include_router(personas.router, prefix="/personas", tags=["personas"])
 api.include_router(agents.router, prefix="/agents", tags=["agents"])
 api.include_router(flows.router, prefix="/flows", tags=["flows"])
 app.include_router(api)
+app.include_router(ollama_proxy.router, prefix="/ollama", tags=["ollama-http-proxy"])
 
 
 @app.get("/api/health")
