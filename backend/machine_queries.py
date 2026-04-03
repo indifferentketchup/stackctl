@@ -31,7 +31,6 @@ async def assignment_for_model(model_name: str) -> dict[str, Any] | None:
 
 
 async def get_route_for_model(model_name: str) -> dict[str, Any] | None:
-    """Same resolution as GET /api/machines/route/{model_name}, as a direct DB call."""
     n = (model_name or "").strip()
     if not n:
         return None
@@ -41,20 +40,13 @@ async def get_route_for_model(model_name: str) -> dict[str, Any] | None:
             """
             SELECT m.id, m.name, m.ollama_url
             FROM model_assignments ma
-            JOIN machines m ON m.id = ma.machine_id
+            JOIN machines m ON ma.machine_id = m.id
             WHERE ma.model_name = ?
             """,
             (n,),
         ) as cur:
             row = await cur.fetchone()
-    if not row:
-        return None
-    d = dict(row)
-    return {
-        "machine_id": int(d["id"]),
-        "machine_name": str(d["name"]),
-        "ollama_url": str(d["ollama_url"]).rstrip("/"),
-    }
+    return dict(row) if row else None
 
 
 async def all_assignments_map() -> dict[str, tuple[int | None, str | None]]:

@@ -27,7 +27,9 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await init_db()
+    await ollama_proxy.startup_http_client()
     yield
+    await ollama_proxy.shutdown_http_client()
 
 
 app = FastAPI(title="ollamactl API", lifespan=lifespan)

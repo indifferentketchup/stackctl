@@ -17,6 +17,27 @@ router = APIRouter()
 
 PROXY_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=5.0)
 
+_http_client: httpx.AsyncClient | None = None
+
+
+async def startup_http_client() -> None:
+    global _http_client
+    _http_client = httpx.AsyncClient(timeout=PROXY_TIMEOUT)
+
+
+async def shutdown_http_client() -> None:
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+
+def _client() -> httpx.AsyncClient:
+    if _http_client is None:
+        raise RuntimeError("ollama_proxy HTTP client not initialized")
+    return _http_client
+
+
 _REQ_EXCLUDE = frozenset(
     {
         "host",
@@ -79,13 +100,15 @@ def _extract_route_model(path_suffix: str, data: Any) -> str | None:
     return str(raw).strip() or None
 
 
-def _wants_stream(body_json: Any, request: Request) -> bool:
+def _wants_stream(path_suffix: str, body_json: Any, request: Request) -> bool:
     ct = (request.headers.get("content-type") or "").lower()
     if "application/x-ndjson" in ct:
         return True
-    if isinstance(body_json, dict) and body_json.get("stream") is True:
-        return True
-    return False
+    if not isinstance(body_json, dict):
+        return False
+    if path_suffix in ("/api/chat", "/api/generate"):
+        return body_json.get("stream") is not False
+    return body_json.get("stream") is True
 
 
 def _not_assigned_response(model: str) -> JSONResponse:
@@ -100,12 +123,19 @@ def _not_assigned_response(model: str) -> JSONResponse:
     )
 
 
+def _unreachable_response(machine_name: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content={"error": f"Machine unreachable: {machine_name}"},
+    )
+
+
 async def _proxy_post(path_suffix: str, request: Request) -> Response:
     body = await request.body()
     try:
         data = json.loads(body.decode("utf-8") if body else "{}")
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return JSONResponse(status_code=422, content={"error": "Invalid JSON body"})
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
 
     route_model = _extract_route_model(path_suffix, data)
     if not route_model:
@@ -115,27 +145,26 @@ async def _proxy_post(path_suffix: str, request: Request) -> Response:
             content={"error": f"Missing '{key}' in request body"},
         )
 
-    route = await get_route_for_model(route_model)
-    if not route:
+    row = await get_route_for_model(route_model)
+    if not row:
         return _not_assigned_response(route_model)
 
-    base = str(route["ollama_url"]).rstrip("/")
+    machine_name = str(row["name"])
+    base = str(row["ollama_url"]).rstrip("/")
     target = f"{base}{path_suffix}"
     fwd_h = _forward_request_headers(request)
+    client = _client()
 
-    if _wants_stream(data, request):
-        client = httpx.AsyncClient(timeout=PROXY_TIMEOUT)
+    if _wants_stream(path_suffix, data, request):
         try:
             req = client.build_request("POST", target, content=body, headers=fwd_h)
             resp = await client.send(req, stream=True)
-        except Exception:
-            await client.aclose()
-            raise
+        except httpx.HTTPError:
+            return _unreachable_response(machine_name)
 
         if resp.status_code >= 400:
             err = await resp.aread()
             await resp.aclose()
-            await client.aclose()
             return Response(
                 content=err,
                 status_code=resp.status_code,
@@ -150,7 +179,6 @@ async def _proxy_post(path_suffix: str, request: Request) -> Response:
                     yield chunk
             finally:
                 await resp.aclose()
-                await client.aclose()
 
         return StreamingResponse(
             iterate(),
@@ -159,10 +187,9 @@ async def _proxy_post(path_suffix: str, request: Request) -> Response:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=PROXY_TIMEOUT) as client:
-            r = await client.post(target, content=body, headers=fwd_h)
-    except httpx.HTTPError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
+        r = await client.post(target, content=body, headers=fwd_h)
+    except httpx.HTTPError:
+        return _unreachable_response(machine_name)
 
     return Response(
         content=r.content,
@@ -171,21 +198,31 @@ async def _proxy_post(path_suffix: str, request: Request) -> Response:
     )
 
 
-async def _merge_models_json(path: str) -> Response:
+async def _machine_get_json(
+    ollama_url: str, path_suffix: str
+) -> tuple[httpx.Response | None, httpx.HTTPError | None]:
+    base = str(ollama_url).rstrip("/")
+    url = f"{base}{path_suffix}"
+    try:
+        r = await _client().get(url)
+        return r, None
+    except httpx.HTTPError as e:
+        return None, e
+
+
+async def _tags_response() -> Response:
     machines = await list_machines()
     if not machines:
         return Response(content=json.dumps({"models": []}).encode(), media_type="application/json")
 
-    async def fetch_one(minfo: dict[str, Any]) -> list[dict[str, Any]]:
-        base = str(minfo["ollama_url"]).rstrip("/")
-        mname = str(minfo["name"])
+    async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
+        mlabel = str(minfo["name"])
+        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/tags")
+        if r is None or r.status_code != 200:
+            return []
         try:
-            async with httpx.AsyncClient(timeout=PROXY_TIMEOUT) as client:
-                r = await client.get(f"{base}{path}")
-                if r.status_code != 200:
-                    return []
-                payload = r.json()
-        except Exception:
+            payload = r.json()
+        except json.JSONDecodeError:
             return []
         models = payload.get("models") if isinstance(payload, dict) else None
         if not isinstance(models, list):
@@ -193,22 +230,18 @@ async def _merge_models_json(path: str) -> Response:
         out: list[dict[str, Any]] = []
         for x in models:
             if isinstance(x, dict):
-                out.append({**x, "machine_name": mname})
+                out.append({**x, "machine": mlabel})
         return out
 
-    results = await asyncio.gather(*[fetch_one(m) for m in machines], return_exceptions=True)
+    results = await asyncio.gather(*[fetch(m) for m in machines], return_exceptions=True)
     merged: list[dict[str, Any]] = []
     seen: set[str] = set()
     for res in results:
         if isinstance(res, BaseException):
             continue
         for m in res:
-            if not isinstance(m, dict):
-                continue
-            name = (m.get("name") or m.get("model") or "").strip()
-            if not name:
-                continue
-            if name in seen:
+            name = (m.get("name") or "").strip()
+            if not name or name in seen:
                 continue
             seen.add(name)
             merged.append(m)
@@ -216,6 +249,118 @@ async def _merge_models_json(path: str) -> Response:
         content=json.dumps({"models": merged}).encode(),
         media_type="application/json",
     )
+
+
+async def _v1_models_response() -> Response:
+    machines = await list_machines()
+    if not machines:
+        return Response(
+            content=json.dumps({"object": "list", "data": []}).encode(),
+            media_type="application/json",
+        )
+
+    async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
+        mlabel = str(minfo["name"])
+        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/v1/models")
+        if r is None or r.status_code != 200:
+            return []
+        try:
+            payload = r.json()
+        except json.JSONDecodeError:
+            return []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for x in data:
+            if isinstance(x, dict):
+                out.append({**x, "machine": mlabel})
+        return out
+
+    results = await asyncio.gather(*[fetch(m) for m in machines], return_exceptions=True)
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        for item in res:
+            mid = (item.get("id") or "").strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            merged.append(item)
+    return Response(
+        content=json.dumps({"object": "list", "data": merged}).encode(),
+        media_type="application/json",
+    )
+
+
+async def _ps_response() -> Response:
+    machines = await list_machines()
+    if not machines:
+        return Response(content=json.dumps({"models": []}).encode(), media_type="application/json")
+
+    async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
+        mlabel = str(minfo["name"])
+        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/ps")
+        if r is None or r.status_code != 200:
+            return []
+        try:
+            payload = r.json()
+        except json.JSONDecodeError:
+            return []
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for x in models:
+            if isinstance(x, dict):
+                out.append({**x, "machine": mlabel})
+        return out
+
+    results = await asyncio.gather(*[fetch(m) for m in machines], return_exceptions=True)
+    merged: list[dict[str, Any]] = []
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        merged.extend(res)
+    return Response(
+        content=json.dumps({"models": merged}).encode(),
+        media_type="application/json",
+    )
+
+
+async def _version_response() -> Response:
+    machines = await list_machines()
+    for minfo in machines:
+        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/version")
+        if r is not None and r.status_code == 200:
+            return Response(
+                content=r.content,
+                status_code=r.status_code,
+                headers=_forward_response_headers(r),
+            )
+    return JSONResponse(status_code=502, content={"error": "No Ollama instance reachable"})
+
+
+@router.post("/v1/chat/completions")
+async def proxy_v1_chat_completions(request: Request):
+    return await _proxy_post("/v1/chat/completions", request)
+
+
+@router.post("/v1/completions")
+async def proxy_v1_completions(request: Request):
+    return await _proxy_post("/v1/completions", request)
+
+
+@router.post("/v1/embeddings")
+async def proxy_v1_embeddings(request: Request):
+    return await _proxy_post("/v1/embeddings", request)
+
+
+@router.get("/v1/models")
+async def proxy_v1_models():
+    return await _v1_models_response()
 
 
 @router.post("/api/chat")
@@ -245,9 +390,14 @@ async def proxy_show(request: Request):
 
 @router.get("/api/tags")
 async def proxy_tags():
-    return await _merge_models_json("/api/tags")
+    return await _tags_response()
 
 
 @router.get("/api/ps")
 async def proxy_ps():
-    return await _merge_models_json("/api/ps")
+    return await _ps_response()
+
+
+@router.get("/api/version")
+async def proxy_version():
+    return await _version_response()
