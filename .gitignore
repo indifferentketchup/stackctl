@@ -6,3 +6,4 @@ npm-debug.log*
 Docs/
 boolab-reference/
 .claude/worktrees/
+.claude/
