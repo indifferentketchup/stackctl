@@ -7,20 +7,12 @@ export function getBifrostHealth() {
   })
 }
 
-export function getBifrostConfig() {
-  return apiFetch('/api/bifrost/config')
-}
-
-export function putBifrostConfig(yamlText) {
-  return apiFetch('/api/bifrost/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ yaml_text: yamlText }),
-  })
-}
-
 export function listBifrostProviders() {
   return apiFetch('/api/bifrost/providers')
+}
+
+export function listBifrostKeys() {
+  return apiFetch('/api/bifrost/keys')
 }
 
 export function listBifrostModels() {

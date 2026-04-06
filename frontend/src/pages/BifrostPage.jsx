@@ -1,18 +1,15 @@
-import { useEffect, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, Save } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Loader2, RefreshCw } from 'lucide-react'
 import {
-  getBifrostConfig,
   getBifrostHealth,
+  listBifrostKeys,
   listBifrostModels,
   listBifrostProviders,
-  putBifrostConfig,
 } from '@/api/bifrost.js'
 import { BIFROST_PROVIDER_LABELS } from '@/constants/bifrostProviderLabels.js'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
-import { Textarea } from '@/components/ui/textarea.jsx'
 
 function providerKeyFromModelId(id) {
   const s = String(id || '')
@@ -43,7 +40,6 @@ function groupBifrostModels(rows) {
 
 export function BifrostPage() {
   const qc = useQueryClient()
-  const [draft, setDraft] = useState('')
 
   const qHealth = useQuery({
     queryKey: ['bifrost-health'],
@@ -52,14 +48,14 @@ export function BifrostPage() {
     retry: false,
   })
 
-  const qConfig = useQuery({
-    queryKey: ['bifrost-config'],
-    queryFn: getBifrostConfig,
-  })
-
   const qProviders = useQuery({
     queryKey: ['bifrost-providers'],
     queryFn: listBifrostProviders,
+  })
+
+  const qKeys = useQuery({
+    queryKey: ['bifrost-keys'],
+    queryFn: listBifrostKeys,
   })
 
   const qModels = useQuery({
@@ -68,19 +64,8 @@ export function BifrostPage() {
     refetchInterval: 60_000,
   })
 
-  useEffect(() => {
-    if (qConfig.data?.yaml_text != null) setDraft(qConfig.data.yaml_text)
-  }, [qConfig.data?.yaml_text])
-
-  const saveMut = useMutation({
-    mutationFn: () => putBifrostConfig(draft),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['bifrost-config'] })
-      qc.invalidateQueries({ queryKey: ['bifrost-models'] })
-    },
-  })
-
   const providers = qProviders.data?.providers ?? []
+  const keys = Array.isArray(qKeys.data) ? qKeys.data : []
   const modelRows = qModels.data?.data ?? []
   const modelGroups = groupBifrostModels(modelRows)
 
@@ -89,7 +74,7 @@ export function BifrostPage() {
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Bifrost</h1>
-          <p className="text-sm text-muted-foreground">OpenAI-compatible router config and merged model list.</p>
+          <p className="text-sm text-muted-foreground">OpenAI-compatible router — providers, keys, and models.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {qHealth.data?.ok ? (
@@ -111,17 +96,30 @@ export function BifrostPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Providers</CardTitle>
-            <CardDescription>From <code className="font-mono-ui text-xs">providers</code> in config YAML.</CardDescription>
+            <CardDescription>
+              <code className="font-mono-ui text-xs">GET /api/providers</code> via Bifrost
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {qProviders.isLoading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
-              <ul className="max-h-48 list-inside list-disc space-y-1 overflow-y-auto text-sm">
-                {providers.length === 0 && <li className="text-muted-foreground">No providers parsed</li>}
+              <ul className="max-h-64 space-y-2 overflow-y-auto text-sm">
+                {providers.length === 0 && <li className="text-muted-foreground">No providers</li>}
                 {providers.map((p, i) => (
-                  <li key={i} className="font-mono-ui text-xs break-all">
-                    {typeof p === 'string' ? p : JSON.stringify(p)}
+                  <li key={i} className="rounded-md border border-border/80 bg-muted/15 px-3 py-2 text-xs space-y-0.5">
+                    <div className="font-medium">{p.name ?? p.key ?? `Provider ${i + 1}`}</div>
+                    {p.base_url && (
+                      <div className="font-mono-ui text-muted-foreground break-all">{p.base_url}</div>
+                    )}
+                    <div className="flex flex-wrap gap-2 pt-0.5">
+                      {p.status != null && (
+                        <Badge variant="outline" className="text-[10px] font-normal">{p.status}</Badge>
+                      )}
+                      {p.concurrency != null && (
+                        <span className="text-muted-foreground">concurrency: {p.concurrency}</span>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -131,38 +129,31 @@ export function BifrostPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Models</CardTitle>
+            <CardTitle className="text-base">Keys</CardTitle>
             <CardDescription>
-              <code className="font-mono-ui text-xs">GET /v1/models</code> via Bifrost
+              <code className="font-mono-ui text-xs">GET /api/keys</code> via Bifrost
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {qModels.isLoading ? (
+            {qKeys.isLoading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
-              <div className="max-h-64 space-y-4 overflow-y-auto text-sm">
-                {modelRows.length === 0 && <p className="text-muted-foreground">No models</p>}
-                {modelGroups.map((g) => (
-                  <div key={g.providerKey}>
-                    <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="text-[10px] font-normal">
-                        {g.label}
-                      </Badge>
-                      <span className="text-xs text-muted-foreground">{g.models.length} model(s)</span>
+              <ul className="max-h-64 space-y-2 overflow-y-auto text-sm">
+                {keys.length === 0 && <li className="text-muted-foreground">No keys</li>}
+                {keys.map((k, i) => (
+                  <li key={i} className="rounded-md border border-border/80 bg-muted/15 px-3 py-2 text-xs space-y-0.5">
+                    <div className="font-medium">{k.name ?? k.key_name ?? `Key ${i + 1}`}</div>
+                    {k.provider && (
+                      <div className="text-muted-foreground">{k.provider}</div>
+                    )}
+                    <div className="text-muted-foreground">
+                      {Array.isArray(k.models) && k.models.length > 0
+                        ? k.models.join(', ')
+                        : 'all models (wildcard)'}
                     </div>
-                    <ul className="space-y-1">
-                      {g.models.map((m) => (
-                        <li
-                          key={m.id}
-                          className="rounded-md border border-border/80 bg-muted/15 px-2 py-1 font-mono-ui text-xs break-all"
-                        >
-                          {m.id}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
           </CardContent>
         </Card>
@@ -170,29 +161,39 @@ export function BifrostPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Config file</CardTitle>
-          <CardDescription>Path is configured on the server (BIFROST_CONFIG_PATH). Save validates YAML and restarts Docker Compose.</CardDescription>
+          <CardTitle className="text-base">Models</CardTitle>
+          <CardDescription>
+            <code className="font-mono-ui text-xs">GET /v1/models</code> via Bifrost
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          {qConfig.data?.path && (
-            <p className="font-mono-ui text-xs text-muted-foreground break-all">{qConfig.data.path}</p>
+        <CardContent>
+          {qModels.isLoading ? (
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          ) : (
+            <div className="max-h-64 space-y-4 overflow-y-auto text-sm">
+              {modelRows.length === 0 && <p className="text-muted-foreground">No models</p>}
+              {modelGroups.map((g) => (
+                <div key={g.providerKey}>
+                  <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" className="text-[10px] font-normal">
+                      {g.label}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{g.models.length} model(s)</span>
+                  </div>
+                  <ul className="space-y-1">
+                    {g.models.map((m) => (
+                      <li
+                        key={m.id}
+                        className="rounded-md border border-border/80 bg-muted/15 px-2 py-1 font-mono-ui text-xs break-all"
+                      >
+                        {m.id}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
           )}
-          <Textarea
-            className="min-h-[320px] font-mono-ui text-xs"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            spellCheck={false}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
-              {saveMut.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-              Save &amp; restart Bifrost
-            </Button>
-            {saveMut.isError && (
-              <span className="text-sm text-destructive">{saveMut.error?.message || 'Save failed'}</span>
-            )}
-            {saveMut.isSuccess && <span className="text-sm text-emerald-600">Saved.</span>}
-          </div>
         </CardContent>
       </Card>
     </div>
