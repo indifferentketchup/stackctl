@@ -1,66 +1,72 @@
-import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Loader2, Server, Unlink } from 'lucide-react'
-import {
-  deleteAssignment,
-  listMachineAssignments,
-  listMachines,
-  upsertAssignment,
-} from '@/api/machines.js'
-import { getRunning } from '@/api/ollama.js'
+import { ExternalLink, Loader2, Server } from 'lucide-react'
+import { listMachines, getMachineStatus } from '@/api/machines.js'
+import { getLlamaSwapRunning } from '@/api/llamaswap.js'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.jsx'
-import { Input } from '@/components/ui/input.jsx'
-import { Label } from '@/components/ui/label.jsx'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { cn } from '@/lib/utils.js'
 
-export function MachinesPage() {
-  const qc = useQueryClient()
-  const [assignModel, setAssignModel] = useState('')
-  const [assignMachineId, setAssignMachineId] = useState('')
+function mibValueFromSmi(s) {
+  const m = String(s ?? '').match(/([\d.]+)/)
+  return m ? Number.parseFloat(m[1]) : NaN
+}
 
-  const qMachines = useQuery({
+function VramUseBar({ usedMibStr, freeMibStr }) {
+  const usedMib = mibValueFromSmi(usedMibStr)
+  const freeMib = mibValueFromSmi(freeMibStr)
+  const totalMib = Number.isFinite(usedMib) && Number.isFinite(freeMib) ? usedMib + freeMib : NaN
+  const pct =
+    Number.isFinite(totalMib) && totalMib > 0 ? Math.min(100, Math.max(0, (usedMib / totalMib) * 100)) : null
+  const usedGb = Number.isFinite(usedMib) ? usedMib / 1024 : null
+  const totalGb = Number.isFinite(totalMib) ? totalMib / 1024 : null
+  const barClass =
+    pct == null ? 'bg-muted' : pct < 70 ? 'bg-emerald-500' : pct <= 90 ? 'bg-amber-500' : 'bg-red-500'
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn('h-full rounded-full transition-[width]', barClass)}
+          style={{ width: pct == null ? '0%' : `${pct}%` }}
+        />
+      </div>
+      <div className="text-[11px] text-muted-foreground">
+        {usedGb != null && totalGb != null
+          ? `${usedGb.toFixed(1)} GB / ${totalGb.toFixed(1)} GB`
+          : `${usedMibStr} · ${freeMibStr}`}
+      </div>
+    </div>
+  )
+}
+
+export function MachinesPage() {
+  const qList = useQuery({
     queryKey: ['machines'],
     queryFn: listMachines,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
-  const qAssignments = useQuery({
-    queryKey: ['machine-assignments'],
-    queryFn: listMachineAssignments,
+  const machines = qList.data?.machines ?? []
+
+  const statusQueries = useQueries({
+    queries: machines.map((m) => ({
+      queryKey: ['machine-status', m.id],
+      queryFn: () => getMachineStatus(m.id, false),
+      refetchInterval: 30_000,
+      enabled: !!m.id,
+    })),
   })
 
-  const machines = qMachines.data?.machines ?? []
-  const assignments = qAssignments.data?.assignments ?? []
-
-  const byMachine = useMemo(() => {
-    const m = {}
-    for (const mach of machines) {
-      m[mach.id] = []
-    }
-    for (const a of assignments) {
-      if (m[a.machine_id]) m[a.machine_id].push(a)
-    }
-    return m
-  }, [machines, assignments])
-
-  const saveMut = useMutation({
-    mutationFn: ({ model_name, machine_id }) => upsertAssignment(model_name, machine_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['machine-assignments'] })
-      qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
-      setAssignModel('')
-    },
-  })
-
-  const unassignMut = useMutation({
-    mutationFn: (model_name) => deleteAssignment(model_name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['machine-assignments'] })
-      qc.invalidateQueries({ queryKey: ['ollama', 'models'] })
-    },
+  const runningQueries = useQueries({
+    queries: machines.map((m) => ({
+      queryKey: ['llamaswap-running', m.id],
+      queryFn: () => getLlamaSwapRunning(m.id),
+      refetchInterval: 15_000,
+      enabled: !!m.id,
+      retry: false,
+    })),
   })
 
   return (
@@ -68,193 +74,98 @@ export function MachinesPage() {
       <header>
         <h1 className="text-2xl font-bold">Machines</h1>
         <p className="text-sm text-muted-foreground">
-          Ollama hosts, SSH type, and per-model routing for boolab. Status refreshes every 30 seconds.
+          GPU hosts over SSH (<code className="font-mono-ui text-xs">nvidia-smi</code>) and llama-swap config per host.
         </p>
       </header>
 
-      {qMachines.isLoading && (
+      {qList.isLoading && (
         <div className="flex items-center gap-2 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin" /> Loading machines…
+          <Loader2 className="h-5 w-5 animate-spin" /> Loading…
         </div>
       )}
 
       <div className="grid gap-4 md:grid-cols-2">
-        {machines.map((m) => (
-          <MachineCard
-            key={m.id}
-            machine={m}
-            assigned={byMachine[m.id] ?? []}
-            onUnassign={(model) => unassignMut.mutate(model)}
-            unassignPending={unassignMut.isPending}
-          />
-        ))}
+        {machines.map((m, i) => {
+          const sq = statusQueries[i]
+          const st = sq?.data
+          const sshOk = st?.ssh_ok
+          const rq = runningQueries[i]
+          const loaded = rq?.data?.loaded_model ?? null
+          return (
+            <Card key={m.id}>
+              <CardHeader className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Server className="h-5 w-5 text-primary" />
+                  <CardTitle className="text-lg">{m.name}</CardTitle>
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      sshOk === true && 'border-emerald-500/50 text-emerald-600',
+                      sshOk === false && 'border-red-500/50 text-red-600'
+                    )}
+                  >
+                    {sq?.isLoading ? '…' : sshOk ? 'SSH OK' : 'SSH / GPU'}
+                  </Badge>
+                </div>
+                <CardDescription className="font-mono-ui text-xs break-all">
+                  {m.ssh_user}@{m.ssh_host} · {m.platform}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-muted-foreground">Currently loaded</span>
+                  {rq?.isLoading && <span className="text-muted-foreground">…</span>}
+                  {rq?.isError && <span className="text-muted-foreground/70">unknown</span>}
+                  {!rq?.isLoading && !rq?.isError && !loaded && (
+                    <span className="text-muted-foreground/60">idle</span>
+                  )}
+                  {!rq?.isLoading && !rq?.isError && loaded && (
+                    <Badge variant="secondary" className="max-w-full truncate font-mono-ui text-[11px]">
+                      {loaded}
+                    </Badge>
+                  )}
+                </div>
+                {st?.stderr && (
+                  <p className="text-xs text-destructive whitespace-pre-wrap break-all">{st.stderr}</p>
+                )}
+                {Array.isArray(st?.gpu) && st.gpu.length > 0 ? (
+                  <ul className="space-y-2 text-sm">
+                    {st.gpu.map((g, j) => (
+                      <li key={j} className="rounded-md border border-border/80 bg-muted/20 px-3 py-2">
+                        <div className="font-medium">{g.name}</div>
+                        <VramUseBar usedMibStr={g.memory_used_mib} freeMibStr={g.memory_free_mib} />
+                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                          <span>Temp: {g.temperature_c}°C</span>
+                          <span>Util: {g.utilization_percent}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  !sq?.isLoading && (
+                    <p className="text-xs text-muted-foreground">
+                      {sshOk === false ? 'No GPU telemetry (check NVIDIA drivers / nvidia-smi).' : '—'}
+                    </p>
+                  )
+                )}
+                <Button variant="outline" size="sm" asChild>
+                  <Link to={`/llamaswap/${encodeURIComponent(m.id)}`} className="inline-flex items-center gap-2">
+                    llama-swap config <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                  </Link>
+                </Button>
+              </CardContent>
+            </Card>
+          )
+        })}
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">All assignments</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <form
-            className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end"
-            onSubmit={(e) => {
-              e.preventDefault()
-              const mid = parseInt(assignMachineId, 10)
-              if (!assignModel.trim() || !Number.isFinite(mid)) return
-              saveMut.mutate({ model_name: assignModel.trim(), machine_id: mid })
-            }}
-          >
-            <div className="flex-1 min-w-[200px]">
-              <Label>Model name</Label>
-              <Input
-                className="mt-1 font-mono-ui text-sm"
-                placeholder="e.g. qwen3.5:9b"
-                value={assignModel}
-                onChange={(e) => setAssignModel(e.target.value)}
-              />
-            </div>
-            <div className="w-full sm:w-48">
-              <Label>Machine</Label>
-              <select
-                className="mt-1 flex h-10 w-full rounded-md border border-border bg-background px-2 text-sm"
-                value={assignMachineId}
-                onChange={(e) => setAssignMachineId(e.target.value)}
-              >
-                <option value="">Select…</option>
-                {machines.map((m) => (
-                  <option key={m.id} value={String(m.id)}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <Button type="submit" disabled={saveMut.isPending || !assignModel.trim() || !assignMachineId}>
-              {saveMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Save assignment
-            </Button>
-          </form>
-
-          <div className="overflow-x-auto border border-border rounded-md">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-border bg-card/80 text-muted-foreground">
-                  <th className="p-2 font-semibold">Model</th>
-                  <th className="p-2 font-semibold">Machine</th>
-                  <th className="p-2 w-[100px]" />
-                </tr>
-              </thead>
-              <tbody>
-                {assignments.length === 0 && (
-                  <tr>
-                    <td colSpan={3} className="p-4 text-muted-foreground text-center">
-                      No assignments yet.
-                    </td>
-                  </tr>
-                )}
-                {assignments.map((a) => (
-                  <tr key={a.id} className="border-b border-border/60">
-                    <td className="p-2 font-mono-ui text-xs">{a.model_name}</td>
-                    <td className="p-2">{a.machine_name}</td>
-                    <td className="p-2">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive"
-                        disabled={unassignMut.isPending}
-                        onClick={() => unassignMut.mutate(a.model_name)}
-                      >
-                        <Unlink className="h-4 w-4" />
-                        Remove
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      <p className="text-xs text-muted-foreground">
-        boolab resolves inference via{' '}
-        <code className="font-mono-ui">GET /api/machines/route/&lt;model&gt;</code> on this API. Assign every model you use in chat.
-      </p>
+      {!qList.isLoading && machines.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          Configure <code className="font-mono-ui text-xs">SAMDESKTOP_HOST</code>,{' '}
+          <code className="font-mono-ui text-xs">GPU_HOST</code>, and matching users in the API{' '}
+          <code className="font-mono-ui text-xs">.env</code>.
+        </p>
+      )}
     </div>
-  )
-}
-
-function MachineCard({ machine, assigned, onUnassign, unassignPending }) {
-  const qRun = useQuery({
-    queryKey: ['ollama-running', 'machine', machine.id],
-    queryFn: () => getRunning(machine.id),
-    enabled: machine.reachable === true,
-    refetchInterval: 30_000,
-  })
-  const nRun =
-    machine.reachable && Array.isArray(qRun.data?.models) ? qRun.data.models.length : machine.running_count ?? 0
-
-  const st = String(machine.ssh_type || 'nssm').toLowerCase()
-
-  return (
-    <Card>
-      <CardHeader className="space-y-1 pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <Server className="h-5 w-5 shrink-0 text-primary" />
-            <CardTitle className="text-lg font-bold truncate">{machine.name}</CardTitle>
-          </div>
-          <span
-            className={cn(
-              'h-2.5 w-2.5 shrink-0 rounded-full mt-1.5',
-              machine.reachable ? 'bg-emerald-500' : 'bg-red-500',
-            )}
-            title={machine.reachable ? 'Reachable' : 'Unreachable'}
-          />
-        </div>
-        {machine.gpu_label ? (
-          <p className="text-sm text-muted-foreground">{machine.gpu_label}</p>
-        ) : null}
-        <p className="font-mono-ui text-xs text-muted-foreground break-all">{machine.ollama_url}</p>
-        <div className="flex flex-wrap gap-2 pt-1">
-          <Badge variant="secondary">{st === 'systemd' ? 'systemd' : 'NSSM'}</Badge>
-          <Badge variant="outline">
-            {machine.reachable ? `${nRun} running` : 'offline'}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-          Assigned models
-        </div>
-        {assigned.length === 0 ? (
-          <p className="text-sm text-muted-foreground">None</p>
-        ) : (
-          <ul className="space-y-1">
-            {assigned.map((a) => (
-              <li
-                key={a.id}
-                className="flex items-center justify-between gap-2 font-mono-ui text-xs border border-border rounded px-2 py-1"
-              >
-                <span className="truncate">{a.model_name}</span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-destructive shrink-0"
-                  disabled={unassignPending}
-                  onClick={() => onUnassign(a.model_name)}
-                >
-                  Unassign
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <Button variant="outline" size="sm" className="mt-2" asChild>
-          <Link to={`/gpu?machine=${machine.id}`}>GPU / env (this host)</Link>
-        </Button>
-      </CardContent>
-    </Card>
   )
 }

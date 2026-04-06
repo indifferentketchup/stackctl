@@ -13,7 +13,14 @@ import httpx
 
 from db import DB_PATH
 from routers.ollama import _ollama_base
-from sam_ssh import connect_sam_desktop, iter_ssh_cmd_lines, powershell_single_quote, remote_temp_modelfile_path, ssh_remove_file, ssh_write_file
+from machines_ssh import (
+    connect_sam_desktop,
+    iter_ssh_cmd_lines,
+    powershell_single_quote,
+    remote_temp_modelfile_path,
+    ssh_remove_file,
+    ssh_write_file,
+)
 from tools.registry import execute_tool
 
 _CTX_KEY = "_last_text"

@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from sam_ssh import connect_sam_desktop, iter_ssh_cmd_lines, powershell_single_quote
+from machines_ssh import connect_sam_desktop, iter_ssh_cmd_lines, powershell_single_quote
 
 
 def _truncate(s: str, n: int) -> str:

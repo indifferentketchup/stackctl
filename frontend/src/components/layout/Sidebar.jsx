@@ -2,19 +2,16 @@ import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard,
-  Cpu,
-  Layers,
-  PlusCircle,
-  FolderInput,
   Users,
-  Monitor,
   BookOpen,
   Bot,
   GitBranch,
   Server,
+  Network,
+  Cpu,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { listModels } from '@/api/ollama.js'
+import { getBifrostHealth } from '@/api/bifrost.js'
 
 const linkClass = ({ isActive }) =>
   cn(
@@ -26,16 +23,16 @@ const Soon = () => <span className="text-xs text-muted-foreground">(soon)</span>
 
 export function Sidebar() {
   const { pathname } = useLocation()
-  const [ollamaOk, setOllamaOk] = useState(null)
+  const [bifrostOk, setBifrostOk] = useState(null)
 
   useEffect(() => {
     let cancelled = false
     const ping = async () => {
       try {
-        await listModels()
-        if (!cancelled) setOllamaOk(true)
+        const h = await getBifrostHealth()
+        if (!cancelled) setBifrostOk(!!h?.ok)
       } catch {
-        if (!cancelled) setOllamaOk(false)
+        if (!cancelled) setBifrostOk(false)
       }
     }
     ping()
@@ -50,9 +47,9 @@ export function Sidebar() {
     <aside className="flex w-full shrink-0 flex-col border-b border-border bg-card/50 md:h-screen md:w-56 md:border-b-0 md:border-r">
       <div className="border-b border-border px-4 py-4">
         <NavLink to="/" className="text-xl font-bold tracking-tight text-primary">
-          ollamactl
+          stackctl
         </NavLink>
-        <p className="text-xs text-muted-foreground">Ollama control plane</p>
+        <p className="text-xs text-muted-foreground">Inference stack control plane</p>
       </div>
       <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-3">
         <NavLink to="/" end className={linkClass}>
@@ -61,39 +58,31 @@ export function Sidebar() {
         </NavLink>
         <div className="space-y-0.5">
           <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Models
+            Stack
           </div>
-          <NavLink to="/models" end className={linkClass}>
-            <Layers className="h-4 w-4 shrink-0" />
-            All models
+          <NavLink to="/machines" className={linkClass}>
+            <Server className="h-4 w-4 shrink-0" />
+            Machines
           </NavLink>
-          <NavLink to="/import" className={linkClass}>
-            <FolderInput className="h-4 w-4 shrink-0" />
-            Import
+          <NavLink to="/bifrost" className={linkClass}>
+            <Network className="h-4 w-4 shrink-0" />
+            Bifrost
           </NavLink>
-          <NavLink to="/models/create" className={linkClass}>
-            <PlusCircle className="h-4 w-4 shrink-0" />
-            Create
+          <NavLink to="/llamaswap/sam-desktop" className={linkClass}>
+            <Cpu className="h-4 w-4 shrink-0" />
+            llama-swap · sam-desktop
+          </NavLink>
+          <NavLink to="/llamaswap/gpu" className={linkClass}>
+            <Cpu className="h-4 w-4 shrink-0" />
+            llama-swap · gpu
           </NavLink>
         </div>
-        <NavLink to="/running" className={linkClass}>
-          <Cpu className="h-4 w-4 shrink-0" />
-          Running
-        </NavLink>
-        <NavLink to="/machines" className={linkClass}>
-          <Server className="h-4 w-4 shrink-0" />
-          Machines
-        </NavLink>
 
         <div className="my-2 border-t border-border" />
 
         <NavLink to="/personas" className={linkClass}>
           <Users className="h-4 w-4 shrink-0" />
           Personas
-        </NavLink>
-        <NavLink to="/gpu" className={linkClass}>
-          <Monitor className="h-4 w-4 shrink-0" />
-          Multi-GPU
         </NavLink>
         <span
           className="flex cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground opacity-50"
@@ -117,10 +106,12 @@ export function Sidebar() {
           <span
             className={cn(
               'h-2 w-2 rounded-full',
-              ollamaOk === true ? 'bg-emerald-500' : ollamaOk === false ? 'bg-red-500' : 'bg-muted-foreground'
+              bifrostOk === true ? 'bg-emerald-500' : bifrostOk === false ? 'bg-red-500' : 'bg-muted-foreground'
             )}
           />
-          <span>Ollama {ollamaOk === true ? 'reachable' : ollamaOk === false ? 'unreachable' : '…'}</span>
+          <span>
+            Bifrost {bifrostOk === true ? 'reachable' : bifrostOk === false ? 'unreachable' : '…'}
+          </span>
         </div>
       </div>
     </aside>

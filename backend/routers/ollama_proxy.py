@@ -117,7 +117,7 @@ def _not_assigned_response(model: str) -> JSONResponse:
         content={
             "error": (
                 f"Model '{model}' is not assigned to any machine. "
-                "Visit ai.indifferentketchup.com/machines to assign it."
+                "Configure model→machine assignments in the stackctl database (model_assignments)."
             )
         },
     )

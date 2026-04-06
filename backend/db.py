@@ -7,30 +7,14 @@ import os
 import aiosqlite
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DB_PATH = os.environ.get("DB_PATH", os.path.join(_REPO_ROOT, "ollamactl.db"))
+DB_PATH = os.environ.get("DB_PATH", os.path.join(_REPO_ROOT, "stackctl.db"))
 
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gpu_config (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gpu_config_baseline (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                json TEXT NOT NULL DEFAULT '{}',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
+        await db.execute("DROP TABLE IF EXISTS gpu_config_baseline")
+        await db.execute("DROP TABLE IF EXISTS gpu_config")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS rag_settings (
@@ -129,22 +113,30 @@ async def init_db() -> None:
 
 
 async def _seed_machines_and_assignments() -> None:
-    gpu_host = (os.environ.get("GPU_HOST") or "100.65.131.75").strip()
-    gpu_user = (os.environ.get("GPU_USER") or "samkintop").strip()
+    sd_host = (os.environ.get("SAMDESKTOP_HOST") or "").strip()
+    sd_user = (os.environ.get("SAMDESKTOP_USER") or "").strip()
+    gpu_host_e = (os.environ.get("GPU_HOST") or "").strip()
+    gpu_user = (os.environ.get("GPU_USER") or "").strip()
+    sd_url = (os.environ.get("SAMDESKTOP_OLLAMA_URL") or os.environ.get("OLLAMA_URL") or "").strip()
+    gpu_url = (os.environ.get("GPU_OLLAMA_URL") or "").strip()
+    if not sd_url and sd_host:
+        sd_url = f"http://{sd_host}:11434"
+    if not gpu_url and gpu_host_e:
+        gpu_url = f"http://{gpu_host_e}:11434"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         async with db.execute("SELECT COUNT(*) FROM machines") as cur:
             row = await cur.fetchone()
             n_m = int(row[0] if row else 0)
-        if n_m == 0:
+        if n_m == 0 and sd_url and gpu_url and sd_host and sd_user and gpu_host_e and gpu_user:
             await db.execute(
                 """
                 INSERT INTO machines (name, ollama_url, ssh_host, ssh_user, ssh_type, gpu_label, is_default)
                 VALUES
-                  ('sam-desktop', 'http://100.101.41.16:11434', '100.101.41.16', 'samki', 'nssm', 'RTX 5090 32GB', 0),
-                  ('gpu', 'http://100.65.131.75:11434', ?, ?, 'systemd', 'RTX 4080 Super 16GB', 0)
+                  ('sam-desktop', ?, ?, ?, 'nssm', 'RTX 5090 32GB', 0),
+                  ('gpu', ?, ?, ?, 'systemd', 'RTX 4080 Super 16GB', 0)
                 """,
-                (gpu_host, gpu_user),
+                (sd_url, sd_host, sd_user, gpu_url, gpu_host_e, gpu_user),
             )
             await db.commit()
 

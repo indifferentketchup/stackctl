@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { fetchSshStatus } from '@/api/models.js'
+import { fetchMachinesSshStatus } from '@/api/machines.js'
 import { cn } from '@/lib/utils.js'
 
+/** Polls SSH reachability for each configured GPU host (Tailscale + keys). */
 export function SshStatusIndicator({ className }) {
   const [data, setData] = useState(null)
 
@@ -9,16 +10,10 @@ export function SshStatusIndicator({ className }) {
     let cancelled = false
     const tick = async () => {
       try {
-        const j = await fetchSshStatus()
+        const j = await fetchMachinesSshStatus()
         if (!cancelled) setData(j)
       } catch {
-        if (!cancelled)
-          setData({
-            connected: false,
-            host: '',
-            user: '',
-            error: 'request failed',
-          })
+        if (!cancelled) setData({ machines: [], error: 'request failed' })
       }
     }
     tick()
@@ -29,23 +24,50 @@ export function SshStatusIndicator({ className }) {
     }
   }, [])
 
-  const ok = data?.connected
-  const label = ok ? 'sam-desktop connected' : 'sam-desktop unreachable'
-  const tip =
-    data == null
-      ? 'Checking SSH…'
-      : `${data.host || '—'} · ${data.user || '—'}${data.error && !ok ? ` · ${data.error}` : ''}`
+  const machines = data?.machines || []
+  const err = data?.error
+
+  if (data === null) {
+    return (
+      <span className={cn('inline-flex items-center gap-2 text-xs text-muted-foreground animate-pulse', className)}>
+        <span className="h-2 w-2 rounded-full bg-muted-foreground" aria-hidden />
+        Checking SSH…
+      </span>
+    )
+  }
+
+  if (err && !machines.length) {
+    return (
+      <span className={cn('inline-flex items-center gap-2 text-xs text-muted-foreground', className)} title={err}>
+        <span className="h-2 w-2 rounded-full bg-red-500" aria-hidden />
+        <span>SSH status unavailable</span>
+      </span>
+    )
+  }
+
+  if (!machines.length) {
+    return (
+      <span className={cn('text-xs text-muted-foreground', className)} title="Set SAMDESKTOP_* and GPU_* in .env">
+        No SSH hosts configured
+      </span>
+    )
+  }
 
   return (
-    <span
-      className={cn('inline-flex items-center gap-2 text-xs text-muted-foreground', className)}
-      title={tip}
-    >
-      <span
-        className={cn('h-2 w-2 rounded-full', ok ? 'bg-green-500' : 'bg-red-500', data == null && 'animate-pulse bg-muted-foreground')}
-        aria-hidden
-      />
-      <span>{label}</span>
+    <span className={cn('inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground', className)}>
+      {machines.map((m) => (
+        <span
+          key={m.id}
+          className="inline-flex items-center gap-1.5"
+          title={m.connected ? 'SSH OK' : 'SSH failed'}
+        >
+          <span
+            className={cn('h-2 w-2 rounded-full', m.connected ? 'bg-emerald-500' : 'bg-red-500')}
+            aria-hidden
+          />
+          <span>{m.id}</span>
+        </span>
+      ))}
     </span>
   )
 }

@@ -1,31 +1,31 @@
 services:
-  ollamactl-api:
+  stackctl-api:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: ollamactl_api
+    container_name: stackctl_api
     restart: unless-stopped
     ports:
       - "100.114.205.53:8700:8700"
     volumes:
-      - /opt/ollamactl/ssh:/opt/ollamactl/ssh:ro
-      - /docker/ollamactl:/data
+      - ./ssh:/opt/stackctl/ssh:ro
+      - /docker/stackctl:/data
     env_file:
       - .env
     networks:
-      - ollamactl_net
+      - stackctl_net
 
-  ollamactl-ui:
+  stackctl-ui:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: ollamactl_ui
+    container_name: stackctl_ui
     restart: unless-stopped
     ports:
       - "100.114.205.53:8701:80"
     networks:
-      - ollamactl_net
+      - stackctl_net
 
 networks:
-  ollamactl_net:
+  stackctl_net:
     driver: bridge

@@ -6,7 +6,7 @@ import os
 
 from fastapi import Header, HTTPException
 
-_SKIP = (os.environ.get("OLLAMACTL_SKIP_AUTH") or "").strip().lower() in (
+_SKIP = (os.environ.get("STACKCTL_SKIP_AUTH") or os.environ.get("OLLAMACTL_SKIP_AUTH") or "").strip().lower() in (
     "1",
     "true",
     "yes",

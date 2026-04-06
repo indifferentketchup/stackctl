@@ -1,4 +1,4 @@
-"""ollamactl API — Ollama control plane backend."""
+"""stackctl API — homelab AI inference control plane (Bifrost + llama-swap)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
-from routers import agents, flows, gpu, machines, modelfile_apply, ollama, ollama_proxy, personas
+from routers import agents, bifrost, flows, llamaswap, machines, ollama_proxy, personas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +32,7 @@ async def lifespan(_app: FastAPI):
     await ollama_proxy.shutdown_http_client()
 
 
-app = FastAPI(title="ollamactl API", lifespan=lifespan)
+app = FastAPI(title="stackctl API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,10 +49,9 @@ async def health():
 
 
 api = APIRouter(prefix="/api")
-api.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
-api.include_router(modelfile_apply.router, prefix="/models", tags=["models"])
 api.include_router(machines.router, prefix="/machines", tags=["machines"])
-api.include_router(gpu.router, prefix="/gpu", tags=["gpu"])
+api.include_router(bifrost.router, prefix="/bifrost", tags=["bifrost"])
+api.include_router(llamaswap.router, prefix="/llamaswap", tags=["llamaswap"])
 api.include_router(personas.router, prefix="/personas", tags=["personas"])
 api.include_router(agents.router, prefix="/agents", tags=["agents"])
 api.include_router(flows.router, prefix="/flows", tags=["flows"])

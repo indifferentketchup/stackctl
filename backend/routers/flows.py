@@ -18,7 +18,7 @@ from auth_deps import require_admin
 from db import DB_PATH
 from flow_nodes.runner import run_flow_linear, ssh_node_kinds
 from routers.ollama import _sse
-from sam_ssh import connect_sam_desktop
+from machines_ssh import connect_sam_desktop
 
 router = APIRouter()
 
