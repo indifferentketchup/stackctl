@@ -189,6 +189,9 @@ async def llamaswap_running(machine_id: str):
             r = await client.get(f"{base}/running")
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+    if r.status_code == 404:
+        # endpoint not available (e.g. tabbyAPI instead of llama-swap) — return empty
+        return {"url": base, "running": None, "loaded_model": None}
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail=f"/running HTTP {r.status_code}")
     try:
