@@ -11,6 +11,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncssh
+import aiosqlite
+
+from db import DB_PATH
 
 
 def _default_key_path() -> str:
@@ -46,8 +49,8 @@ def gpu_key_path() -> str:
     return (os.environ.get("GPU_SSH_KEY") or _default_key_path()).strip()
 
 
-def normalize_machine_id(machine_id: str) -> str:
-    s = (machine_id or "").strip().lower().replace("_", "-")
+def normalize_machine_id(machine_id: str | int) -> str:
+    s = str(machine_id or "").strip().lower().replace("_", "-")
     if s in ("samdesktop", "sam-desktop"):
         return "sam-desktop"
     if s == "gpu":
@@ -55,19 +58,34 @@ def normalize_machine_id(machine_id: str) -> str:
     return s
 
 
-def machine_connection_params(machine_id: str) -> tuple[str, str, str]:
-    mid = normalize_machine_id(machine_id)
-    if mid == "sam-desktop":
-        h, u, k = sam_desktop_host(), sam_desktop_user(), sam_desktop_key_path()
-    elif mid == "gpu":
-        h, u, k = gpu_host(), gpu_user(), gpu_key_path()
-    else:
+async def machine_connection_params(machine_id: str | int) -> tuple[str, str, str]:
+    mid_raw = str(machine_id or "").strip()
+    mid_name = normalize_machine_id(machine_id)
+    maybe_int: int | None = None
+    try:
+        maybe_int = int(mid_raw)
+    except (TypeError, ValueError):
+        maybe_int = None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT ip, ssh_user, ssh_key_path FROM machines WHERE id = ? OR name = ? LIMIT 1",
+            (maybe_int, mid_name),
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
         raise ValueError(f"Unknown machine_id: {machine_id}")
-    if not h or not u:
-        raise ValueError(f"Host/user not configured for machine {mid}")
-    if not k or not os.path.isfile(k):
-        raise OSError("SSH key is not available")
-    return h, u, k
+
+    host = str(row["ip"] or "").strip()
+    user = str(row["ssh_user"] or "").strip()
+    key = str(row["ssh_key_path"] or "").strip()
+    if not key or not os.path.isfile(key):
+        key = _default_key_path()
+    if not host or not user:
+        raise ValueError(f"Host/user not configured for machine {machine_id}")
+    return host, user, key
 
 
 def powershell_single_quote(s: str) -> str:
@@ -79,13 +97,30 @@ def wrap_windows_command(command: str) -> str:
     return f"powershell -NoProfile -EncodedCommand {enc}"
 
 
-def prepare_remote_command(machine_id: str, command: str) -> str:
-    mid = normalize_machine_id(machine_id)
-    if mid == "sam-desktop":
+async def prepare_remote_command(machine_id: str | int, command: str) -> str:
+    mid_raw = str(machine_id or "").strip()
+    mid_name = normalize_machine_id(machine_id)
+    maybe_int: int | None = None
+    try:
+        maybe_int = int(mid_raw)
+    except (TypeError, ValueError):
+        maybe_int = None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT os FROM machines WHERE id = ? OR name = ? LIMIT 1",
+            (maybe_int, mid_name),
+        ) as cur:
+            row = await cur.fetchone()
+
+    if not row:
+        raise ValueError(f"Unknown machine_id: {machine_id}")
+
+    os_name = str(row["os"] or "ubuntu").strip().lower()
+    if os_name == "windows":
         return wrap_windows_command(command)
-    if mid == "gpu":
-        return f"bash -lc {shlex.quote(command)}"
-    raise ValueError(f"Unknown machine_id: {machine_id}")
+    return f"bash -lc {shlex.quote(command)}"
 
 
 async def connect_ssh(host: str, user: str, key_path: str) -> asyncssh.SSHClientConnection:
@@ -111,8 +146,8 @@ async def connect_ssh(host: str, user: str, key_path: str) -> asyncssh.SSHClient
     return conn
 
 
-async def connect_for_machine(machine_id: str) -> asyncssh.SSHClientConnection:
-    h, u, k = machine_connection_params(machine_id)
+async def connect_for_machine(machine_id: str | int) -> asyncssh.SSHClientConnection:
+    h, u, k = await machine_connection_params(machine_id)
     return await connect_ssh(h, u, k)
 
 
@@ -164,8 +199,8 @@ async def ssh_remove_file(conn: asyncssh.SSHClientConnection, remote_path: str) 
         pass
 
 
-async def ssh_exec(machine_id: str, command: str) -> tuple[str, str, int]:
-    remote = prepare_remote_command(machine_id, command)
+async def ssh_exec(machine_id: str | int, command: str) -> tuple[str, str, int]:
+    remote = await prepare_remote_command(machine_id, command)
     conn = await connect_for_machine(machine_id)
     try:
         r = await conn.run(remote, check=False, encoding="utf-8")
@@ -212,8 +247,8 @@ async def iter_ssh_cmd_lines(
         await asyncio.gather(t1, t2, return_exceptions=True)
 
 
-async def ssh_stream_lines(machine_id: str, command: str) -> AsyncIterator[tuple[str, int | None]]:
-    remote = prepare_remote_command(machine_id, command)
+async def ssh_stream_lines(machine_id: str | int, command: str) -> AsyncIterator[tuple[str, int | None]]:
+    remote = await prepare_remote_command(machine_id, command)
     conn = await connect_for_machine(machine_id)
     try:
         async for item in iter_ssh_cmd_lines(conn, remote):

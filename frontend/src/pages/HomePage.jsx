@@ -4,7 +4,6 @@ import {
   ArrowRight,
   BookOpen,
   Bot,
-  Cpu,
   GitBranch,
   Network,
   Server,
@@ -19,7 +18,7 @@ const cards = [
   {
     to: '/machines',
     title: 'Machines',
-    description: 'GPU telemetry over SSH, links to llama-swap editors.',
+    description: 'GPU machines, inference frameworks, live stats.',
     icon: Server,
   },
   {
@@ -27,18 +26,6 @@ const cards = [
     title: 'Bifrost',
     description: 'Router YAML, providers, merged OpenAI model list.',
     icon: Network,
-  },
-  {
-    to: '/llamaswap/sam-desktop',
-    title: 'llama-swap (sam-desktop)',
-    description: 'Windows host config, running models, unload.',
-    icon: Cpu,
-  },
-  {
-    to: '/llamaswap/gpu',
-    title: 'llama-swap (gpu)',
-    description: 'Linux host config and service controls.',
-    icon: Cpu,
   },
   {
     to: '/personas',

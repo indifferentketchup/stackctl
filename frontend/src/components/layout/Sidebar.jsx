@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard,
@@ -8,10 +9,11 @@ import {
   GitBranch,
   Server,
   Network,
-  Cpu,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getBifrostHealth } from '@/api/bifrost.js'
+import { getMachines } from '@/api/machines.js'
+import { FrameworkBadge } from '@/components/machines/FrameworkBadge.jsx'
 
 const linkClass = ({ isActive }) =>
   cn(
@@ -24,6 +26,10 @@ const Soon = () => <span className="text-xs text-muted-foreground">(soon)</span>
 export function Sidebar() {
   const { pathname } = useLocation()
   const [bifrostOk, setBifrostOk] = useState(null)
+  const qMachines = useQuery({
+    queryKey: ['machines'],
+    queryFn: getMachines,
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -68,14 +74,17 @@ export function Sidebar() {
             <Network className="h-4 w-4 shrink-0" />
             Bifrost
           </NavLink>
-          <NavLink to="/llamaswap/sam-desktop" className={linkClass}>
-            <Cpu className="h-4 w-4 shrink-0" />
-            llama-swap · sam-desktop
-          </NavLink>
-          <NavLink to="/llamaswap/gpu" className={linkClass}>
-            <Cpu className="h-4 w-4 shrink-0" />
-            llama-swap · gpu
-          </NavLink>
+          {qMachines.isLoading && <div className="mx-3 my-1 h-6 animate-pulse rounded bg-muted" />}
+          {!qMachines.isLoading &&
+            !qMachines.isError &&
+            (qMachines.data?.machines || []).map((m) => (
+              <NavLink key={m.id} to={`/machines/${encodeURIComponent(m.id)}`} className={linkClass}>
+                <span className="truncate">{m.name}</span>
+                <span className="ml-auto shrink-0">
+                  <FrameworkBadge framework={m.framework} compact />
+                </span>
+              </NavLink>
+            ))}
         </div>
 
         <div className="my-2 border-t border-border" />

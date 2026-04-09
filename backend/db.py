@@ -15,6 +15,8 @@ async def init_db() -> None:
         await db.execute("PRAGMA foreign_keys = ON")
         await db.execute("DROP TABLE IF EXISTS gpu_config_baseline")
         await db.execute("DROP TABLE IF EXISTS gpu_config")
+        await db.execute("DROP TABLE IF EXISTS model_assignments")
+        await db.execute("DROP TABLE IF EXISTS machines")
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS rag_settings (
@@ -86,85 +88,88 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                ollama_url TEXT NOT NULL,
-                ssh_host TEXT,
-                ssh_user TEXT,
-                ssh_type TEXT NOT NULL DEFAULT 'nssm',
-                gpu_label TEXT,
-                is_default INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-            """
-        )
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS model_assignments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_name TEXT NOT NULL UNIQUE,
-                machine_id INTEGER NOT NULL REFERENCES machines(id),
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                ip TEXT NOT NULL,
+                os TEXT NOT NULL DEFAULT 'ubuntu',
+                ssh_user TEXT NOT NULL,
+                ssh_key_path TEXT,
+                prom_job TEXT,
+                gpu_prom_job TEXT,
+                framework TEXT DEFAULT 'none',
+                framework_url TEXT,
+                framework_config_path TEXT,
+                framework_restart_cmd TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
             )
             """
         )
         await db.commit()
 
-    await _seed_machines_and_assignments()
+    await _seed_machines()
 
 
-async def _seed_machines_and_assignments() -> None:
+async def _seed_machines() -> None:
     sd_host = (os.environ.get("SAMDESKTOP_HOST") or "").strip()
     sd_user = (os.environ.get("SAMDESKTOP_USER") or "").strip()
-    gpu_host_e = (os.environ.get("GPU_HOST") or "").strip()
+    sd_key = (os.environ.get("SAMDESKTOP_SSH_KEY") or "").strip() or None
+    sd_lswap_url = (os.environ.get("SAMDESKTOP_LLAMASWAP_URL") or "").strip() or None
+    sd_lswap_cfg = (os.environ.get("SAMDESKTOP_LLAMASWAP_CONFIG") or "").strip() or None
+    gpu_host_v = (os.environ.get("GPU_HOST") or "").strip()
     gpu_user = (os.environ.get("GPU_USER") or "").strip()
-    sd_url = (os.environ.get("SAMDESKTOP_OLLAMA_URL") or os.environ.get("OLLAMA_URL") or "").strip()
-    gpu_url = (os.environ.get("GPU_OLLAMA_URL") or "").strip()
-    if not sd_url and sd_host:
-        sd_url = f"http://{sd_host}:11434"
-    if not gpu_url and gpu_host_e:
-        gpu_url = f"http://{gpu_host_e}:11434"
+    gpu_key = (os.environ.get("GPU_SSH_KEY") or "").strip() or None
+    gpu_framework_url = (os.environ.get("GPU_TABBYAPI_URL") or "").strip() or None
+    if not gpu_framework_url and gpu_host_v:
+        gpu_framework_url = f"http://{gpu_host_v}:9101"
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
         async with db.execute("SELECT COUNT(*) FROM machines") as cur:
             row = await cur.fetchone()
             n_m = int(row[0] if row else 0)
-        if n_m == 0 and sd_url and gpu_url and sd_host and sd_user and gpu_host_e and gpu_user:
+        if n_m != 0:
+            return
+
+        if sd_host and sd_user:
             await db.execute(
                 """
-                INSERT INTO machines (name, ollama_url, ssh_host, ssh_user, ssh_type, gpu_label, is_default)
-                VALUES
-                  ('sam-desktop', ?, ?, ?, 'nssm', 'RTX 5090 32GB', 0),
-                  ('gpu', ?, ?, ?, 'systemd', 'RTX 4080 Super 16GB', 0)
+                INSERT INTO machines
+                (name, ip, os, ssh_user, ssh_key_path, prom_job, gpu_prom_job, framework, framework_url, framework_config_path, framework_restart_cmd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (sd_url, sd_host, sd_user, gpu_url, gpu_host_e, gpu_user),
+                (
+                    "sam-desktop",
+                    sd_host,
+                    "windows",
+                    sd_user,
+                    sd_key,
+                    "windows_exporter",
+                    "nvidia_gpu_exporter_desktop",
+                    "llama-swap",
+                    sd_lswap_url,
+                    sd_lswap_cfg,
+                    'cmd /c "C:\\Tools\\nssm\\nssm.exe restart llama-swap"',
+                ),
             )
-            await db.commit()
 
-        async with db.execute("SELECT COUNT(*) FROM model_assignments") as cur:
-            row2 = await cur.fetchone()
-            n_a = int(row2[0] if row2 else 0)
-        if n_a == 0:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT id, name FROM machines WHERE name IN ('sam-desktop', 'gpu')"
-            ) as cur:
-                rows = await cur.fetchall()
-            by_name = {str(r["name"]): int(r["id"]) for r in rows}
-            mid_gpu = by_name.get("gpu")
-            mid_sd = by_name.get("sam-desktop")
-            if mid_gpu is not None and mid_sd is not None:
-                pairs = [
-                    ("qwen3.5:9b", mid_gpu),
-                    ("qwen3-embedding:latest", mid_gpu),
-                    ("qwen3.5:27b", mid_sd),
-                    ("qwen3-coder:30b", mid_sd),
-                ]
-                for model_name, mid in pairs:
-                    await db.execute(
-                        """
-                        INSERT INTO model_assignments (model_name, machine_id, created_at, updated_at)
-                        VALUES (?, ?, datetime('now'), datetime('now'))
-                        """,
-                        (model_name, mid),
-                    )
-                await db.commit()
+        if gpu_host_v and gpu_user:
+            await db.execute(
+                """
+                INSERT INTO machines
+                (name, ip, os, ssh_user, ssh_key_path, prom_job, gpu_prom_job, framework, framework_url, framework_config_path, framework_restart_cmd)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "gpu",
+                    gpu_host_v,
+                    "ubuntu",
+                    gpu_user,
+                    gpu_key,
+                    "gpu-machine",
+                    "dcgm",
+                    "tabbyapi",
+                    gpu_framework_url,
+                    "/opt/tabbyapi/config.yml",
+                    "sudo systemctl restart tabbyapi",
+                ),
+            )
+
+        await db.commit()

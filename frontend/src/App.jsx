@@ -4,8 +4,8 @@ import { HomePage } from '@/pages/HomePage.jsx'
 import { PersonasPage } from '@/pages/PersonasPage.jsx'
 import { PlaceholderPage } from '@/pages/PlaceholderPage.jsx'
 import { MachinesPage } from '@/pages/MachinesPage.jsx'
+import { MachineDetailPage } from '@/pages/MachineDetailPage.jsx'
 import { BifrostPage } from '@/pages/BifrostPage.jsx'
-import { LlamaSwapPage } from '@/pages/LlamaSwapPage.jsx'
 import { AgentsPage } from '@/pages/AgentsPage.jsx'
 import { AgentEditorPage } from '@/pages/AgentEditorPage.jsx'
 import { FlowsPage } from '@/pages/FlowsPage.jsx'
@@ -19,8 +19,8 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/personas" element={<PersonasPage />} />
           <Route path="/machines" element={<MachinesPage />} />
+          <Route path="/machines/:id" element={<MachineDetailPage />} />
           <Route path="/bifrost" element={<BifrostPage />} />
-          <Route path="/llamaswap/:machineId" element={<LlamaSwapPage />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/new" element={<AgentEditorPage />} />

@@ -11,10 +11,11 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
-from routers import agents, bifrost, flows, llamaswap, machines, ollama_proxy, personas
+from routers import agents, bifrost, flows, machines, ollama_proxy, personas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+logging.info("PROMETHEUS_URL=%s", (os.environ.get("PROMETHEUS_URL") or "http://100.114.205.53:9090").strip())
 
 
 def _cors_origins() -> list[str]:
@@ -51,7 +52,6 @@ async def health():
 api = APIRouter(prefix="/api")
 api.include_router(machines.router, prefix="/machines", tags=["machines"])
 api.include_router(bifrost.router, prefix="/bifrost", tags=["bifrost"])
-api.include_router(llamaswap.router, prefix="/llamaswap", tags=["llamaswap"])
 api.include_router(personas.router, prefix="/personas", tags=["personas"])
 api.include_router(agents.router, prefix="/agents", tags=["agents"])
 api.include_router(flows.router, prefix="/flows", tags=["flows"])

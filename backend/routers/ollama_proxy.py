@@ -1,4 +1,4 @@
-"""Ollama HTTP API reverse proxy — single entrypoint; routes by model assignment."""
+"""Ollama HTTP API reverse proxy — single entrypoint; routes by machine registry."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from machine_queries import get_route_for_model, list_machines
+from machine_queries import list_machines
 
 router = APIRouter()
 
@@ -116,8 +116,8 @@ def _not_assigned_response(model: str) -> JSONResponse:
         status_code=422,
         content={
             "error": (
-                f"Model '{model}' is not assigned to any machine. "
-                "Configure model→machine assignments in the stackctl database (model_assignments)."
+                f"Model '{model}' cannot be routed to an Ollama machine. "
+                "Configure at least one machine with framework='ollama' and framework_url."
             )
         },
     )
@@ -128,6 +128,20 @@ def _unreachable_response(machine_name: str) -> JSONResponse:
         status_code=502,
         content={"error": f"Machine unreachable: {machine_name}"},
     )
+
+
+async def _pick_ollama_route(_model: str) -> dict[str, Any] | None:
+    machines = await list_machines()
+    for row in machines:
+        framework = str(row.get("framework") or "").strip().lower()
+        url = str(row.get("framework_url") or row.get("ollama_url") or "").strip()
+        if framework == "ollama" and url:
+            return {"name": row.get("name"), "ollama_url": url}
+    return None
+
+
+def _machine_ollama_url(minfo: dict[str, Any]) -> str:
+    return str(minfo.get("framework_url") or minfo.get("ollama_url") or "").strip()
 
 
 async def _proxy_post(path_suffix: str, request: Request) -> Response:
@@ -145,7 +159,7 @@ async def _proxy_post(path_suffix: str, request: Request) -> Response:
             content={"error": f"Missing '{key}' in request body"},
         )
 
-    row = await get_route_for_model(route_model)
+    row = await _pick_ollama_route(route_model)
     if not row:
         return _not_assigned_response(route_model)
 
@@ -217,7 +231,12 @@ async def _tags_response() -> Response:
 
     async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
         mlabel = str(minfo["name"])
-        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/tags")
+        if str(minfo.get("framework") or "").strip().lower() != "ollama":
+            return []
+        base = _machine_ollama_url(minfo)
+        if not base:
+            return []
+        r, _err = await _machine_get_json(base, "/api/tags")
         if r is None or r.status_code != 200:
             return []
         try:
@@ -261,7 +280,12 @@ async def _v1_models_response() -> Response:
 
     async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
         mlabel = str(minfo["name"])
-        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/v1/models")
+        if str(minfo.get("framework") or "").strip().lower() != "ollama":
+            return []
+        base = _machine_ollama_url(minfo)
+        if not base:
+            return []
+        r, _err = await _machine_get_json(base, "/v1/models")
         if r is None or r.status_code != 200:
             return []
         try:
@@ -302,7 +326,12 @@ async def _ps_response() -> Response:
 
     async def fetch(minfo: dict[str, Any]) -> list[dict[str, Any]]:
         mlabel = str(minfo["name"])
-        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/ps")
+        if str(minfo.get("framework") or "").strip().lower() != "ollama":
+            return []
+        base = _machine_ollama_url(minfo)
+        if not base:
+            return []
+        r, _err = await _machine_get_json(base, "/api/ps")
         if r is None or r.status_code != 200:
             return []
         try:
@@ -333,7 +362,12 @@ async def _ps_response() -> Response:
 async def _version_response() -> Response:
     machines = await list_machines()
     for minfo in machines:
-        r, _err = await _machine_get_json(str(minfo["ollama_url"]), "/api/version")
+        if str(minfo.get("framework") or "").strip().lower() != "ollama":
+            continue
+        base = _machine_ollama_url(minfo)
+        if not base:
+            continue
+        r, _err = await _machine_get_json(base, "/api/version")
         if r is not None and r.status_code == 200:
             return Response(
                 content=r.content,
