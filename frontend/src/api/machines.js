@@ -82,6 +82,21 @@ export function putFrameworkConfig(id, yaml_text) {
   })
 }
 
+export function getConfigBackups(machineId) {
+  return apiFetch(`/api/machines/${encodeURIComponent(machineId)}/framework/config/backups`)
+}
+
+export function getConfigBackup(machineId, backupId) {
+  return apiFetch(`/api/machines/${encodeURIComponent(machineId)}/framework/config/backups/${encodeURIComponent(backupId)}`)
+}
+
+export function restoreConfigBackup(machineId, backupId) {
+  return apiFetch(
+    `/api/machines/${encodeURIComponent(machineId)}/framework/config/backups/${encodeURIComponent(backupId)}/restore`,
+    { method: 'POST' }
+  )
+}
+
 export function restartFramework(id) {
   return apiFetch(`/api/machines/${encodeURIComponent(id)}/framework/restart`, {
     method: 'POST',

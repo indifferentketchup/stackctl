@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from auth_deps import require_admin
+from config_backups import list_backups, read_backup, save_backup
 from db import DB_PATH
 from machines_ssh import (
     connect_for_machine,
@@ -407,6 +408,12 @@ async def framework_config_put(machine_id: int, body: FrameworkConfigBody, _owne
         raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}") from e
     conn = await connect_for_machine(machine_id)
     try:
+        try:
+            current_content = await ssh_read_file(conn, path)
+        except Exception:
+            current_content = None
+        if current_content is not None:
+            await save_backup(int(row["id"]), str(row["name"]), path, current_content)
         await ssh_write_file(conn, path, body.yaml_text)
     finally:
         conn.close()
@@ -414,6 +421,56 @@ async def framework_config_put(machine_id: int, body: FrameworkConfigBody, _owne
     if code != 0:
         raise HTTPException(status_code=500, detail=f"Restart failed: {(err or '')[:2000]}")
     return {"ok": True, "path": path}
+
+
+@router.get("/{machine_id}/framework/config/backups")
+async def framework_config_backups_list(machine_id: int, _owner: dict = Depends(require_admin)):
+    await _get_machine_row(machine_id)
+    backups = await list_backups(machine_id)
+    return {"backups": backups}
+
+
+@router.get("/{machine_id}/framework/config/backups/{bid}")
+async def framework_config_backup_get(machine_id: int, bid: str, _owner: dict = Depends(require_admin)):
+    await _get_machine_row(machine_id)
+    try:
+        content = await read_backup(machine_id, bid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="Backup not found") from e
+    return {"id": bid, "yaml_text": content}
+
+
+@router.post("/{machine_id}/framework/config/backups/{bid}/restore")
+async def framework_config_backup_restore(machine_id: int, bid: str, _owner: dict = Depends(require_admin)):
+    row = await _get_machine_row(machine_id)
+    path = str(row["framework_config_path"] or "").strip()
+    restart_cmd = str(row["framework_restart_cmd"] or "").strip()
+    if not path or not restart_cmd:
+        raise HTTPException(status_code=503, detail="framework_config_path/framework_restart_cmd is not set")
+    try:
+        content = await read_backup(machine_id, bid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="Backup not found") from e
+
+    conn = await connect_for_machine(machine_id)
+    try:
+        try:
+            current_content = await ssh_read_file(conn, path)
+        except Exception:
+            current_content = None
+        if current_content is not None:
+            await save_backup(int(row["id"]), str(row["name"]), path, current_content)
+        await ssh_write_file(conn, path, content)
+    finally:
+        conn.close()
+    _out, err, code = await ssh_exec(machine_id, restart_cmd)
+    if code != 0:
+        raise HTTPException(status_code=500, detail=f"Restart failed: {(err or '')[:2000]}")
+    return {"ok": True, "restored_id": bid}
 
 
 @router.post("/{machine_id}/framework/restart")
@@ -480,8 +537,8 @@ async def framework_unload(machine_id: int, _owner: dict = Depends(require_admin
     return {"ok": True}
 
 
-@router.get("/{machine_id}/framework/models")
-async def framework_models(machine_id: int, _owner: dict = Depends(require_admin)):
+async def internal_framework_models(machine_id: int) -> dict[str, Any]:
+    """Same behavior as GET /{machine_id}/framework/models (no HTTP)."""
     row = await _get_machine_row(machine_id)
     framework = str(row["framework"] or "none").strip().lower()
     base = str(row["framework_url"] or "").strip().rstrip("/")
@@ -539,6 +596,11 @@ async def framework_models(machine_id: int, _owner: dict = Depends(require_admin
         except Exception:
             pass
     return {"models": []}
+
+
+@router.get("/{machine_id}/framework/models")
+async def framework_models(machine_id: int, _owner: dict = Depends(require_admin)):
+    return await internal_framework_models(machine_id)
 
 
 @router.post("/{machine_id}/framework/tabby/load")

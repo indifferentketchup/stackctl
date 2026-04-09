@@ -9,6 +9,7 @@ import {
   GitBranch,
   Server,
   Network,
+  Layers,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getBifrostHealth } from '@/api/bifrost.js'
@@ -69,6 +70,10 @@ export function Sidebar() {
           <NavLink to="/machines" className={linkClass}>
             <Server className="h-4 w-4 shrink-0" />
             Machines
+          </NavLink>
+          <NavLink to="/models" className={linkClass}>
+            <Layers className="h-4 w-4 shrink-0" />
+            Models
           </NavLink>
           <NavLink to="/bifrost" className={linkClass}>
             <Network className="h-4 w-4 shrink-0" />

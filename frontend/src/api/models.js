@@ -1,5 +1,10 @@
+import { apiFetch } from './client.js'
 import { fetchMachinesSshStatus } from './machines.js'
 import { consumeSsePost } from './ollama.js'
+
+export function getModelCatalog() {
+  return apiFetch('/api/models/catalog')
+}
 
 /**
  * Back-compat for agent/flow pages: SSH tools target sam-desktop when present.

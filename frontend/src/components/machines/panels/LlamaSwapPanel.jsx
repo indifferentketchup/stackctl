@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, Loader2 } from 'lucide-react'
+import { ChevronDown, Clock, Loader2 } from 'lucide-react'
 import * as yaml from 'js-yaml'
 import {
   getFrameworkConfig,
@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.j
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Textarea } from '@/components/ui/textarea.jsx'
+import { ConfigBackupDrawer } from '@/components/machines/ConfigBackupDrawer.jsx'
 
 function parseModelParams(cmd, modelObj) {
   const text = String(cmd || '')
@@ -54,6 +55,7 @@ export function LlamaSwapPanel({ machineId }) {
   const [draft, setDraft] = useState('')
   const [warmPendingModel, setWarmPendingModel] = useState(null)
   const [paramsOpen, setParamsOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   const qRunning = useQuery({
     queryKey: ['framework-running', machineId],
@@ -224,6 +226,9 @@ export function LlamaSwapPanel({ machineId }) {
               {restartMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Restart Only
             </Button>
+            <Button type="button" variant="outline" size="icon" title="History" onClick={() => setHistoryOpen(true)}>
+              <Clock className="h-4 w-4" />
+            </Button>
           </div>
           {qConfig.isError || saveMut.isError || restartMut.isError ? (
             <p className="text-sm text-destructive">{qConfig.error?.message || saveMut.error?.message || restartMut.error?.message}</p>
@@ -324,6 +329,16 @@ export function LlamaSwapPanel({ machineId }) {
           </Collapsible>
         </CardContent>
       </Card>
+
+      <ConfigBackupDrawer
+        machineId={machineId}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onRestore={() => {
+          qc.invalidateQueries({ queryKey: ['framework-config', machineId] })
+          qc.invalidateQueries({ queryKey: ['config-backups', machineId] })
+        }}
+      />
     </div>
   )
 }

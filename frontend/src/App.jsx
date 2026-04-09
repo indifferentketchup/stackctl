@@ -10,6 +10,7 @@ import { AgentsPage } from '@/pages/AgentsPage.jsx'
 import { AgentEditorPage } from '@/pages/AgentEditorPage.jsx'
 import { FlowsPage } from '@/pages/FlowsPage.jsx'
 import { FlowEditorPage } from '@/pages/FlowEditorPage.jsx'
+import { ModelsPage } from '@/pages/ModelsPage.jsx'
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/personas" element={<PersonasPage />} />
           <Route path="/machines" element={<MachinesPage />} />
+          <Route path="/models" element={<ModelsPage />} />
           <Route path="/machines/:id" element={<MachineDetailPage />} />
           <Route path="/bifrost" element={<BifrostPage />} />
           <Route path="/rag" element={<PlaceholderPage title="RAG" phase="Phase 6" />} />

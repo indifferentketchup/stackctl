@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
+import { Clock, Loader2 } from 'lucide-react'
 import {
   getFrameworkConfig,
   getFrameworkModels,
@@ -14,11 +14,13 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Textarea } from '@/components/ui/textarea.jsx'
+import { ConfigBackupDrawer } from '@/components/machines/ConfigBackupDrawer.jsx'
 
 export function TabbyApiPanel({ machineId }) {
   const qc = useQueryClient()
   const [draft, setDraft] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   const qRunning = useQuery({
     queryKey: ['framework-running', machineId],
@@ -150,12 +152,25 @@ export function TabbyApiPanel({ machineId }) {
               {restartMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Restart Only
             </Button>
+            <Button type="button" variant="outline" size="icon" title="History" onClick={() => setHistoryOpen(true)}>
+              <Clock className="h-4 w-4" />
+            </Button>
           </div>
           {qConfig.isError || saveMut.isError || restartMut.isError ? (
             <p className="text-sm text-destructive">{qConfig.error?.message || saveMut.error?.message || restartMut.error?.message}</p>
           ) : null}
         </CardContent>
       </Card>
+
+      <ConfigBackupDrawer
+        machineId={machineId}
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onRestore={() => {
+          qc.invalidateQueries({ queryKey: ['framework-config', machineId] })
+          qc.invalidateQueries({ queryKey: ['config-backups', machineId] })
+        }}
+      />
     </div>
   )
 }

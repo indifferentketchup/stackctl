@@ -11,7 +11,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import init_db
-from routers import agents, bifrost, flows, machines, ollama_proxy, personas
+from routers import agents, bifrost, flows, machines, model_catalog, ollama_proxy, personas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +51,7 @@ async def health():
 
 api = APIRouter(prefix="/api")
 api.include_router(machines.router, prefix="/machines", tags=["machines"])
+api.include_router(model_catalog.router, prefix="/models", tags=["models"])
 api.include_router(bifrost.router, prefix="/bifrost", tags=["bifrost"])
 api.include_router(personas.router, prefix="/personas", tags=["personas"])
 api.include_router(agents.router, prefix="/agents", tags=["agents"])

@@ -7,6 +7,7 @@ import {
   GitBranch,
   Network,
   Server,
+  Layers,
   Users,
 } from 'lucide-react'
 import { getBifrostHealth } from '@/api/bifrost.js'
@@ -20,6 +21,12 @@ const cards = [
     title: 'Machines',
     description: 'GPU machines, inference frameworks, live stats.',
     icon: Server,
+  },
+  {
+    to: '/models',
+    title: 'Models',
+    description: 'All models across all machines. Load status, VRAM, Bifrost routing.',
+    icon: Layers,
   },
   {
     to: '/bifrost',
