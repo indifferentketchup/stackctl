@@ -179,7 +179,7 @@ async def remote_temp_modelfile_path(conn: asyncssh.SSHClientConnection, fname: 
 
 async def ssh_read_file(conn: asyncssh.SSHClientConnection, remote_path: str) -> str:
     async with conn.start_sftp_client() as sftp:
-        async with sftp.open(remote_path) as f:
+        async with sftp.open(remote_path, "rb") as f:
             data = await f.read()
     return data.decode("utf-8", errors="replace")
 
