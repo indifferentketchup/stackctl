@@ -558,7 +558,7 @@ async def internal_framework_models(machine_id: int) -> dict[str, Any]:
         names: set[str] = set()
         model_dir = "/docker/tabbyapi/models"
         if config_path:
-            model_dir = str(pathlib.PurePosixPath(config_path).parent) or model_dir
+            model_dir = str(pathlib.PurePosixPath(config_path).parent / "models")
         out, _err, code = await ssh_exec(machine_id, f"ls {shlex.quote(model_dir)}")
         if code == 0:
             for line in (out or "").splitlines():
