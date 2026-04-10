@@ -555,31 +555,27 @@ async def internal_framework_models(machine_id: int) -> dict[str, Any]:
         return {"models": _model_ids_from_config(text)}
 
     if framework == "tabbyapi":
-        names: set[str] = set()
-        model_dir = "/docker/tabbyapi/models"
-        if config_path:
-            model_dir = str(pathlib.PurePosixPath(config_path).parent / "models")
-        out, _err, code = await ssh_exec(machine_id, f"ls {shlex.quote(model_dir)}")
-        if code == 0:
-            for line in (out or "").splitlines():
-                stem = pathlib.Path(line.strip()).stem.strip()
-                if stem:
-                    names.add(stem)
-        if base:
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
-                    resp = await client.get(f"{base}/v1/models")
-                payload = resp.json() if resp.status_code < 400 else {}
-                data = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict):
-                            val = (item.get("id") or item.get("name") or "").strip()
-                            if val:
-                                names.add(val)
-            except Exception:
-                pass
-        return {"models": sorted(names)}
+        if not base:
+            return {"models": []}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
+                resp = await client.get(f"{base}/v1/models")
+            payload = resp.json() if resp.status_code < 400 else {}
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(data, list):
+                names = sorted(
+                    [
+                        val
+                        for item in data
+                        if isinstance(item, dict)
+                        for val in [str(item.get("id") or item.get("name") or "").strip()]
+                        if val
+                    ]
+                )
+                return {"models": names}
+        except Exception:
+            pass
+        return {"models": []}
 
     if framework == "ollama" and base:
         try:
