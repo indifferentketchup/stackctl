@@ -181,7 +181,9 @@ async def ssh_read_file(conn: asyncssh.SSHClientConnection, remote_path: str) ->
     async with conn.start_sftp_client() as sftp:
         async with sftp.open(remote_path, "rb") as f:
             data = await f.read()
-    return data.decode("utf-8", errors="replace")
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
 
 
 async def ssh_write_file(conn: asyncssh.SSHClientConnection, remote_path: str, content: str) -> None:
